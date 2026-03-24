@@ -1,17 +1,15 @@
 <p align="center">
-  <pre align="center">
-     _____ _____   ____
-    / ____/ ____| |  _ \ ___ _ __ ___  ___  _ __   __ _
-   | |   | |      | |_) / _ \ '__/ __|/ _ \| '_ \ / _` |
-   | |___| |____  |  __/  __/ |  \__ \ (_) | | | | (_| |
-    \_____\_____| |_|   \___|_|  |___/\___/|_| |_|\__,_|
-  </pre>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://readme-typing-svg.demolab.com?font=Bitcount+Grid+Double+Ink&weight=300&size=100&duration=1600&pause=1000&color=E6EDF3&center=true&vCenter=true&repeat=false&width=1100&height=130&lines=CC+Persona">
+    <img src="https://readme-typing-svg.demolab.com?font=Bitcount+Grid+Double+Ink&weight=300&size=100&duration=1600&pause=1000&color=1F2328&center=true&vCenter=true&repeat=false&width=1100&height=130&lines=CC+Persona" alt="CC Persona">
+  </picture>
+  <br/>
   <strong>Instant persona switching for Claude Code.</strong><br/>
-  <sub>One CLI. One skill. Every configuration — switched in a blink.</sub>
+  <sub>One CLI. One skill. Every configuration, switched in a blink.</sub>
 </p>
 
 <p align="center">
-  <a href="https://github.com/nicepkg/cc-persona/actions"><img src="https://img.shields.io/github/actions/workflow/status/nicepkg/cc-persona/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/centitenka/cc-persona/actions/workflows/ci.yml"><img src="https://github.com/centitenka/cc-persona/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange?style=flat-square&logo=rust" alt="Rust"></a>
 </p>
