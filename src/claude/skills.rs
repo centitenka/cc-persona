@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Paths;
 use crate::persona::SkillsConfig;
@@ -31,6 +31,14 @@ pub fn switch_skills_symlink(paths: &Paths, persona_name: &str) -> Result<()> {
     replace_with_symlink(&paths.claude_skills, &target)
         .context("Failed to switch skills symlink")?;
     Ok(())
+}
+
+pub fn resolve_skills_dir(paths: &Paths) -> Result<PathBuf> {
+    if paths.claude_skills.is_symlink() {
+        Ok(std::fs::read_link(&paths.claude_skills)?)
+    } else {
+        Ok(paths.claude_skills.clone())
+    }
 }
 
 fn is_symlink(path: &Path) -> bool {

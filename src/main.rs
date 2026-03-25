@@ -1,3 +1,4 @@
+mod active_persona;
 mod backup;
 mod claude;
 mod cli;
@@ -21,8 +22,15 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Init) => commands::init::run(&paths),
         Some(Commands::List) => commands::list::run(&paths),
-        Some(Commands::Use { name }) => commands::use_cmd::run(&paths, name),
-        Some(Commands::Off) => commands::off::run(&paths),
+        Some(Commands::Use {
+            name,
+            save_current,
+            discard_current,
+        }) => commands::use_cmd::run(&paths, name, save_current, discard_current),
+        Some(Commands::Off {
+            save_current,
+            discard_current,
+        }) => commands::off::run(&paths, save_current, discard_current),
         Some(Commands::Create { name }) => commands::create::run(&paths, &name),
         Some(Commands::Snap { name }) => commands::snap::run(&paths, name),
         Some(Commands::Edit { name }) => commands::edit::run(&paths, &name),

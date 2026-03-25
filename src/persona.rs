@@ -24,14 +24,14 @@ pub struct Persona {
     pub claude_md: Option<ClaudeMdConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct SkillsConfig {
     /// Skills that should be active (others in skill-set dir will be disabled)
     #[serde(default)]
     pub active: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpConfig {
     /// MCP servers to enable
     #[serde(default)]
@@ -41,7 +41,7 @@ pub struct McpConfig {
     pub disable: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ClaudeMdConfig {
     /// Filename in ~/.cc-persona/claude-md/
     #[serde(default)]

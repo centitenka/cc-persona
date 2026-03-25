@@ -1,13 +1,19 @@
 use anyhow::{Context, Result, bail};
 use dialoguer::{Select, theme::ColorfulTheme};
 
+use crate::active_persona::{self, PersistChoice};
 use crate::backup;
 use crate::claude::{claude_md, mcp, settings, skills};
 use crate::commands::init;
 use crate::config::{AppConfig, Paths};
 use crate::persona::{self, Persona};
 
-pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
+pub fn run(
+    paths: &Paths,
+    name: Option<String>,
+    save_current: bool,
+    discard_current: bool,
+) -> Result<()> {
     let persona_name = match name {
         Some(n) => n,
         None => interactive_select(paths)?,
@@ -25,6 +31,13 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
     // Resolve persona (with inheritance)
     let resolved = Persona::resolve(&persona_name, &paths.personas)
         .with_context(|| format!("Failed to resolve persona '{}'", persona_name))?;
+
+    let persist_choice = active_persona::persist_choice(save_current, discard_current);
+    active_persona::guard_and_handle_dirty(
+        paths,
+        persist_choice,
+        &rerun_command(&persona_name, persist_choice),
+    )?;
 
     // Backup current state
     let backup_dir = backup::create_backup(paths)?;
@@ -70,9 +83,20 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
     let mut config = AppConfig::load(&paths.config)?;
     config.active_persona = Some(persona_name.clone());
     config.save(&paths.config)?;
+    active_persona::write_snapshot(paths, &persona_name)?;
 
     eprintln!("\n🎭 Switched to persona: {}", persona_name);
     Ok(())
+}
+
+fn rerun_command(persona_name: &str, persist_choice: Option<PersistChoice>) -> String {
+    let mut command = format!("cc-persona use {}", persona_name);
+    match persist_choice {
+        Some(PersistChoice::Save) => command.push_str(" --save-current"),
+        Some(PersistChoice::Discard) => command.push_str(" --discard-current"),
+        None => {}
+    }
+    command
 }
 
 fn interactive_select(paths: &Paths) -> Result<String> {
@@ -94,6 +118,7 @@ fn interactive_select(paths: &Paths) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::active_persona;
     use crate::test_support::TestEnv;
     use serde_json::json;
 
@@ -171,7 +196,7 @@ file = "engineer.md"
         env.create_skill(&env.paths.claude_skills, "alpha", "---\nname: alpha\n---\n");
         env.create_skill(&env.paths.claude_skills, "beta", "---\nname: beta\n---\n");
 
-        run(&env.paths, Some("engineer".to_string())).unwrap();
+        run(&env.paths, Some("engineer".to_string()), false, false).unwrap();
 
         let backup_entries: Vec<_> = std::fs::read_dir(&env.paths.backups)
             .unwrap()
@@ -242,5 +267,81 @@ file = "engineer.md"
 
         let config = AppConfig::load(&env.paths.config).unwrap();
         assert_eq!(config.active_persona.as_deref(), Some("engineer"));
+        assert!(env.paths.active_persona_state.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_blocks_when_current_persona_is_dirty_without_explicit_choice() {
+        let env = TestEnv::new();
+        env.paths.ensure_dirs().unwrap();
+
+        env.write_file(
+            &persona::persona_path(&env.paths.personas, "engineer"),
+            "name = \"engineer\"\n",
+        );
+        env.write_file(
+            &persona::persona_path(&env.paths.personas, "designer"),
+            "name = \"designer\"\n",
+        );
+        env.write_file(&env.paths.config, "active_persona = \"engineer\"\n");
+        env.write_file(&env.paths.claude_settings, "{}");
+        env.write_file(&env.paths.claude_json, "{\"mcpServers\":{}}");
+        env.write_file(&env.paths.claude_md_file, "clean");
+        std::fs::create_dir_all(env.paths.skill_sets.join("engineer")).unwrap();
+        std::fs::create_dir_all(env.paths.skill_sets.join("designer")).unwrap();
+        skills::switch_skills_symlink(&env.paths, "engineer").unwrap();
+
+        active_persona::write_snapshot(&env.paths, "engineer").unwrap();
+        env.write_file(&env.paths.claude_md_file, "dirty");
+
+        let err = run(&env.paths, Some("designer".to_string()), false, false).unwrap_err();
+
+        assert!(format!("{err:#}").contains("unsaved changes"));
+        assert_eq!(
+            AppConfig::load(&env.paths.config)
+                .unwrap()
+                .active_persona
+                .as_deref(),
+            Some("engineer")
+        );
+        assert_eq!(std::fs::read_dir(&env.paths.backups).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_can_discard_dirty_current_persona_and_continue() {
+        let env = TestEnv::new();
+        env.paths.ensure_dirs().unwrap();
+
+        env.write_file(
+            &persona::persona_path(&env.paths.personas, "engineer"),
+            "name = \"engineer\"\n",
+        );
+        env.write_file(
+            &persona::persona_path(&env.paths.personas, "designer"),
+            "name = \"designer\"\n",
+        );
+        env.write_file(&env.paths.config, "active_persona = \"engineer\"\n");
+        env.write_file(&env.paths.claude_settings, "{}");
+        env.write_file(&env.paths.claude_json, "{\"mcpServers\":{}}");
+        env.write_file(&env.paths.claude_md_file, "clean");
+        std::fs::create_dir_all(env.paths.skill_sets.join("engineer")).unwrap();
+        std::fs::create_dir_all(env.paths.skill_sets.join("designer")).unwrap();
+        skills::switch_skills_symlink(&env.paths, "engineer").unwrap();
+
+        active_persona::write_snapshot(&env.paths, "engineer").unwrap();
+        env.write_file(&env.paths.claude_md_file, "dirty");
+
+        run(&env.paths, Some("designer".to_string()), false, true).unwrap();
+
+        assert_eq!(
+            AppConfig::load(&env.paths.config)
+                .unwrap()
+                .active_persona
+                .as_deref(),
+            Some("designer")
+        );
+        assert!(env.paths.active_persona_state.exists());
     }
 }

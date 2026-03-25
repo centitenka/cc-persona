@@ -22,8 +22,12 @@ the `cc-persona` CLI tool via Bash.
 
 - `cc-persona list` — List all available personas (marks active one)
 - `cc-persona use <name>` — Switch to a persona
+- `cc-persona use <name> --save-current` — Save current persona changes, then switch
+- `cc-persona use <name> --discard-current` — Discard current persona changes, then switch
 - `cc-persona which` — Show current active persona
 - `cc-persona off` — Restore original configuration
+- `cc-persona off --save-current` — Save current persona changes, then restore
+- `cc-persona off --discard-current` — Discard current persona changes, then restore
 - `cc-persona skill list` — List skills and their status in current persona
 - `cc-persona skill toggle <name>` — Toggle a skill on/off
 - `cc-persona show [name]` — Show full resolved config of a persona
@@ -34,8 +38,20 @@ the `cc-persona` CLI tool via Bash.
 1. If user wants to see options: run `cc-persona list`
 2. If user names a persona: run `cc-persona use <name>`
 3. If user wants to revert: run `cc-persona off`
-4. After switching, inform the user what changed
-5. **ALWAYS** remind the user to restart their Claude Code session after switching
+4. If `use`/`off` reports unsaved changes in the current persona, ask whether to save or discard them
+5. Recommend saving by default, then rerun with `--save-current` or `--discard-current`
+6. After switching, inform the user what changed
+7. **ALWAYS** remind the user to restart their Claude Code session after switching
+
+## Dirty persona guard
+
+If the current persona has unsaved changes, `cc-persona use` and `cc-persona off`
+will stop and require an explicit choice:
+
+- Use `--save-current` to persist the current persona first (recommended)
+- Use `--discard-current` to continue without saving
+
+Never silently choose `--discard-current`. Ask the user first.
 
 ## CRITICAL: Post-switch reminder
 
@@ -152,5 +168,8 @@ mod tests {
             env.read_file(&env.paths.personas.join("plain.toml"))
                 .contains("name = \"plain\"")
         );
+        let skill = env.read_file(&env.paths.claude_skills.join("cc-persona").join("SKILL.md"));
+        assert!(skill.contains("--save-current"));
+        assert!(skill.contains("--discard-current"));
     }
 }

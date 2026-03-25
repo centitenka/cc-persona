@@ -19,6 +19,7 @@ impl TestEnv {
         let paths = Paths {
             root: root.clone(),
             config: root.join("config.toml"),
+            active_persona_state: root.join("active-persona-state.json"),
             personas: root.join("personas"),
             skill_sets: root.join("skill-sets"),
             claude_md: root.join("claude-md"),

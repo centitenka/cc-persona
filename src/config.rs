@@ -37,6 +37,8 @@ pub struct Paths {
     pub root: PathBuf,
     /// ~/.cc-persona/config.toml
     pub config: PathBuf,
+    /// ~/.cc-persona/active-persona-state.json
+    pub active_persona_state: PathBuf,
     /// ~/.cc-persona/personas/
     pub personas: PathBuf,
     /// ~/.cc-persona/skill-sets/
@@ -62,6 +64,7 @@ impl Paths {
         let claude_dir = home.join(".claude");
         Ok(Self {
             config: root.join("config.toml"),
+            active_persona_state: root.join("active-persona-state.json"),
             personas: root.join("personas"),
             skill_sets: root.join("skill-sets"),
             claude_md: root.join("claude-md"),

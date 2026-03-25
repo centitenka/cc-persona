@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.1] - 2026-03-25
+
+### Added
+
+- Dirty-persona guard for `use` and `off` with explicit `--save-current` / `--discard-current` flow
+- Active persona state snapshot tracking under `~/.cc-persona/` for materialized dirty detection
+- Save-current persistence for live settings, skill activation, MCP state, and CLAUDE.md content
+
+### Changed
+
+- Built-in `cc-persona` skill now explains the save/discard flow and tells Claude to ask before discarding
+- Documentation now covers dirty persona handling and the new CLI flags
+
 ## [0.1.0] - 2026-03-25
 
 ### Added

@@ -46,9 +46,5 @@ pub fn run_rm(paths: &Paths, name: &str) -> Result<()> {
 }
 
 fn resolve_skills_dir(paths: &Paths) -> Result<std::path::PathBuf> {
-    if paths.claude_skills.is_symlink() {
-        Ok(std::fs::read_link(&paths.claude_skills)?)
-    } else {
-        Ok(paths.claude_skills.clone())
-    }
+    skills::resolve_skills_dir(paths)
 }

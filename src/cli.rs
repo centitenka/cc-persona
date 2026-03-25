@@ -24,10 +24,23 @@ pub enum Commands {
     Use {
         /// Persona name
         name: Option<String>,
+        /// Save current active persona changes before switching
+        #[arg(long, conflicts_with = "discard_current")]
+        save_current: bool,
+        /// Discard current active persona changes before switching
+        #[arg(long, conflicts_with = "save_current")]
+        discard_current: bool,
     },
 
     /// Restore original configuration (undo last switch)
-    Off,
+    Off {
+        /// Save current active persona changes before restoring
+        #[arg(long, conflicts_with = "discard_current")]
+        save_current: bool,
+        /// Discard current active persona changes before restoring
+        #[arg(long, conflicts_with = "save_current")]
+        discard_current: bool,
+    },
 
     /// Create a new persona
     Create {
