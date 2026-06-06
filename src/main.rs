@@ -4,6 +4,7 @@ mod claude;
 mod cli;
 mod commands;
 mod config;
+mod diagnostics;
 mod persona;
 mod symlink;
 #[cfg(test)]
@@ -42,6 +43,9 @@ fn main() -> Result<()> {
             SkillAction::Toggle { name } => commands::skill::run_toggle(&paths, &name),
             SkillAction::Rm { name } => commands::skill::run_rm(&paths, &name),
         },
+        Some(Commands::Doctor) => commands::doctor::run(&paths),
+        Some(Commands::Adopt { into, names }) => commands::adopt::run(&paths, into, names),
+        Some(Commands::Migrate { copy }) => commands::migrate::run(&paths, copy),
         None => {
             // No subcommand — show status
             commands::which::run(&paths)

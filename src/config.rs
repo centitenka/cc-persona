@@ -43,6 +43,8 @@ pub struct Paths {
     pub personas: PathBuf,
     /// ~/.cc-persona/skill-sets/
     pub skill_sets: PathBuf,
+    /// ~/.cc-persona/skill-store/
+    pub skill_store: PathBuf,
     /// ~/.cc-persona/claude-md/
     pub claude_md: PathBuf,
     /// ~/.cc-persona/backups/
@@ -67,6 +69,7 @@ impl Paths {
             active_persona_state: root.join("active-persona-state.json"),
             personas: root.join("personas"),
             skill_sets: root.join("skill-sets"),
+            skill_store: root.join("skill-store"),
             claude_md: root.join("claude-md"),
             backups: root.join("backups"),
             root,
@@ -83,11 +86,91 @@ impl Paths {
             &self.root,
             &self.personas,
             &self.skill_sets,
+            &self.skill_store,
             &self.claude_md,
             &self.backups,
         ] {
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestEnv;
+
+    #[test]
+    fn load_returns_default_when_file_missing() {
+        let env = TestEnv::new();
+        let missing = env.paths.root.join("does-not-exist").join("config.toml");
+        assert!(!missing.exists());
+
+        let config = AppConfig::load(&missing).unwrap();
+
+        assert_eq!(config.active_persona, None);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_active_persona() {
+        let env = TestEnv::new();
+        let config = AppConfig {
+            active_persona: Some("engineer".to_string()),
+        };
+
+        config.save(&env.paths.config).unwrap();
+        let loaded = AppConfig::load(&env.paths.config).unwrap();
+
+        assert_eq!(loaded.active_persona, Some("engineer".to_string()));
+    }
+
+    #[test]
+    fn save_creates_missing_parent_directories() {
+        let env = TestEnv::new();
+        let nested = env
+            .paths
+            .root
+            .join("deeply")
+            .join("nested")
+            .join("config.toml");
+        assert!(!nested.parent().unwrap().exists());
+
+        AppConfig::default().save(&nested).unwrap();
+
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn ensure_dirs_creates_all_directories_including_skill_store() {
+        let env = TestEnv::new();
+        assert!(!env.paths.skill_store.exists());
+
+        env.paths.ensure_dirs().unwrap();
+
+        for dir in [
+            &env.paths.root,
+            &env.paths.personas,
+            &env.paths.skill_sets,
+            &env.paths.skill_store,
+            &env.paths.claude_md,
+            &env.paths.backups,
+        ] {
+            assert!(
+                dir.is_dir(),
+                "expected directory to exist: {}",
+                dir.display()
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_dirs_is_idempotent_when_run_twice() {
+        let env = TestEnv::new();
+
+        env.paths.ensure_dirs().unwrap();
+        env.paths.ensure_dirs().unwrap();
+
+        assert!(env.paths.skill_store.is_dir());
     }
 }

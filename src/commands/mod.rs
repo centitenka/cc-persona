@@ -1,8 +1,11 @@
+pub mod adopt;
 pub mod create;
 pub mod diff;
+pub mod doctor;
 pub mod edit;
 pub mod init;
 pub mod list;
+pub mod migrate;
 pub mod off;
 pub mod show;
 pub mod skill;

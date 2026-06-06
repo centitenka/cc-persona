@@ -22,6 +22,7 @@ impl TestEnv {
             active_persona_state: root.join("active-persona-state.json"),
             personas: root.join("personas"),
             skill_sets: root.join("skill-sets"),
+            skill_store: root.join("skill-store"),
             claude_md: root.join("claude-md"),
             backups: root.join("backups"),
             claude_settings: claude_dir.join("settings.json"),
@@ -51,6 +52,20 @@ impl TestEnv {
         let skill_dir = skills_dir.join(name);
         std::fs::create_dir_all(&skill_dir).expect("create skill dir");
         self.write_file(&skill_dir.join("SKILL.md"), content);
+    }
+
+    /// Create a skill directory inside the shared skill-store with a SKILL.md.
+    pub(crate) fn create_store_skill(&self, name: &str, content: &str) {
+        self.create_skill(&self.paths.skill_store, name, content);
+    }
+
+    /// Link a store skill into ~/.claude/skills as a directory symlink,
+    /// mirroring the managed-link model.
+    #[cfg(unix)]
+    pub(crate) fn link_into_claude_skills(&self, name: &str) {
+        let target = self.paths.skill_store.join(name);
+        let link = self.paths.claude_skills.join(name);
+        self.symlink(&target, &link);
     }
 
     #[cfg(unix)]

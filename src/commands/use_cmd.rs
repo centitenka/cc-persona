@@ -4,9 +4,9 @@ use dialoguer::{Select, theme::ColorfulTheme};
 use crate::active_persona::{self, PersistChoice};
 use crate::backup;
 use crate::claude::{claude_md, mcp, settings, skills};
-use crate::commands::init;
 use crate::config::{AppConfig, Paths};
 use crate::persona::{self, Persona};
+use crate::symlink;
 
 pub fn run(
     paths: &Paths,
@@ -51,18 +51,22 @@ pub fn run(
         eprintln!("✓ Applied settings.json overrides");
     }
 
-    // Switch skills symlink
-    skills::switch_skills_symlink(paths, &persona_name)?;
-    // Ensure cc-persona skill is always present in the target skill-set
-    let target_skill_set = paths.skill_sets.join(&persona_name);
-    init::install_skill(&target_skill_set.join("cc-persona"))?;
-    eprintln!("✓ Switched skills → {}", persona_name);
-
-    // Apply per-skill toggles
-    if let Some(ref skills_config) = resolved.skills {
-        let skill_set_dir = paths.skill_sets.join(&persona_name);
-        skills::apply_skill_toggles(&skill_set_dir, skills_config)?;
-        eprintln!("✓ Applied skill toggles");
+    // Reconcile skills: ~/.claude/skills is a real directory holding per-skill
+    // symlinks into the shared store. Linking exactly the desired set (active ∪
+    // {cc-persona}) replaces the old whole-directory symlink + toggle dance.
+    symlink::ensure_real_dir(&paths.claude_skills)?;
+    let report = skills::reconcile_skills(paths, &resolved)?;
+    eprintln!(
+        "✓ Reconciled skills → {} ({} linked, {} unlinked)",
+        persona_name,
+        report.linked.len(),
+        report.unlinked.len()
+    );
+    if !report.untracked.is_empty() {
+        eprintln!(
+            "  ⚠ {} untracked skill(s) not managed by cc-persona. Run `cc-persona adopt` to take them over (details: `cc-persona doctor`).",
+            report.untracked.len()
+        );
     }
 
     // Apply MCP config
@@ -192,9 +196,12 @@ file = "engineer.md"
             "engineer instructions",
         );
 
+        // New model: ~/.claude/skills is a real directory; the shared store holds
+        // the single copies; reconcile links exactly the desired set.
         std::fs::create_dir_all(&env.paths.claude_skills).unwrap();
-        env.create_skill(&env.paths.claude_skills, "alpha", "---\nname: alpha\n---\n");
-        env.create_skill(&env.paths.claude_skills, "beta", "---\nname: beta\n---\n");
+        env.create_store_skill("alpha", "---\nname: alpha\n---\n");
+        env.create_store_skill("beta", "---\nname: beta\n---\n");
+        env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
 
         run(&env.paths, Some("engineer".to_string()), false, false).unwrap();
 
@@ -223,35 +230,24 @@ file = "engineer.md"
             })
         );
 
-        assert!(env.paths.claude_skills.is_symlink());
+        // ~/.claude/skills stays a real directory (I1).
+        assert!(!env.paths.claude_skills.is_symlink());
+        // alpha (active) is a per-skill symlink into the store.
+        let alpha_link = env.paths.claude_skills.join("alpha");
+        assert!(
+            skills::list_skills_ext(&env.paths.claude_skills)
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "alpha" && e.managed)
+        );
         assert_eq!(
-            std::fs::read_link(&env.paths.claude_skills).unwrap(),
-            env.paths.skill_sets.join("engineer")
+            std::fs::read_link(&alpha_link).unwrap(),
+            env.paths.skill_store.join("alpha")
         );
-        assert!(
-            env.paths
-                .skill_sets
-                .join("engineer")
-                .join("cc-persona")
-                .join("SKILL.md")
-                .exists()
-        );
-        assert!(
-            !skills::list_skills(&env.paths.skill_sets.join("engineer"))
-                .unwrap()
-                .into_iter()
-                .find(|(name, _)| name == "alpha")
-                .unwrap()
-                .1
-        );
-        assert!(
-            skills::list_skills(&env.paths.skill_sets.join("engineer"))
-                .unwrap()
-                .into_iter()
-                .find(|(name, _)| name == "beta")
-                .unwrap()
-                .1
-        );
+        // beta is not active → no link.
+        assert!(!env.paths.claude_skills.join("beta").exists());
+        // cc-persona is always linked.
+        assert!(env.paths.claude_skills.join("cc-persona").is_symlink());
 
         let claude_json = mcp::read_claude_json(&env.paths.claude_json).unwrap();
         let servers = claude_json["mcpServers"].as_object().unwrap();

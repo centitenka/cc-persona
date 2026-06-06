@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::config::Paths;
+use crate::symlink;
 
 pub const SKILL_CONTENT: &str = r#"---
 name: cc-persona
@@ -32,6 +33,9 @@ the `cc-persona` CLI tool via Bash.
 - `cc-persona skill toggle <name>` — Toggle a skill on/off
 - `cc-persona show [name]` — Show full resolved config of a persona
 - `cc-persona diff [name]` — Compare current config with a persona
+- `cc-persona doctor` — Health-check skills/plugins/MCP state and report drift (alias: `status`)
+- `cc-persona adopt [names...]` — Take untracked skills under management (add to a persona)
+- `cc-persona migrate` — Migrate a v0.1 layout to the shared skill-store + per-skill links
 
 ## Workflow
 
@@ -72,22 +76,6 @@ pub fn install_skill(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ensure cc-persona skill exists in every skill-set directory.
-pub fn ensure_skill_in_all_skill_sets(paths: &Paths) -> Result<()> {
-    if !paths.skill_sets.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(&paths.skill_sets)? {
-        let entry = entry?;
-        if entry.path().is_dir() {
-            let target = entry.path().join("cc-persona");
-            // Always overwrite to ensure latest version
-            install_skill(&target)?;
-        }
-    }
-    Ok(())
-}
-
 pub fn run(paths: &Paths) -> Result<()> {
     // Create cc-persona directories
     paths.ensure_dirs()?;
@@ -115,13 +103,23 @@ description = "Minimal default persona — clean slate"
         std::fs::write(&plain_md, "")?;
     }
 
-    // Install cc-persona skill into ALL existing skill-sets
-    ensure_skill_in_all_skill_sets(paths)?;
+    // Install the cc-persona skill as the single shared copy in the store.
+    let store_cc_persona = paths.skill_store.join("cc-persona");
+    install_skill(&store_cc_persona)?;
 
-    // Also install directly into ~/.claude/skills/cc-persona/ if it's a real dir
-    // (before first persona switch, skills is still a real directory)
-    if !paths.claude_skills.is_symlink() && paths.claude_skills.is_dir() {
-        install_skill(&paths.claude_skills.join("cc-persona"))?;
+    // If ~/.claude/skills is still a legacy whole-directory symlink (v0.1 model),
+    // we cannot safely manage per-skill links yet — prompt the user to migrate.
+    if symlink::is_symlink(&paths.claude_skills) {
+        eprintln!(
+            "  ⚠ ~/.claude/skills is a symlink (legacy v0.1 model). Run `cc-persona migrate` to switch to the shared store + per-skill links."
+        );
+    } else {
+        // ~/.claude/skills is (or becomes) a real directory; link cc-persona in.
+        symlink::ensure_real_dir(&paths.claude_skills)?;
+        let cc_link = paths.claude_skills.join("cc-persona");
+        if !symlink::is_symlink(&cc_link) && !cc_link.exists() {
+            symlink::link_skill(&store_cc_persona, &cc_link)?;
+        }
     }
 
     eprintln!("✓ Installed cc-persona skill for Claude Code");
@@ -139,6 +137,7 @@ mod tests {
     use super::*;
     use crate::test_support::TestEnv;
 
+    #[cfg(unix)]
     #[test]
     fn run_creates_default_layout_and_installs_skill() {
         let env = TestEnv::new();
@@ -148,15 +147,19 @@ mod tests {
 
         assert!(env.paths.root.exists());
         assert!(env.paths.personas.join("plain.toml").exists());
+        // cc-persona is now installed as the single shared store copy.
         assert!(
             env.paths
-                .skill_sets
-                .join("plain")
+                .skill_store
                 .join("cc-persona")
                 .join("SKILL.md")
                 .exists()
         );
         assert!(env.paths.claude_md.join("plain.md").exists());
+        // ~/.claude/skills stays a real directory; cc-persona is a managed link.
+        assert!(!env.paths.claude_skills.is_symlink());
+        assert!(env.paths.claude_skills.join("cc-persona").is_symlink());
+        // The link resolves to the store SKILL.md.
         assert!(
             env.paths
                 .claude_skills

@@ -195,14 +195,22 @@ fn save_current_persona(paths: &Paths, persona_name: &str) -> Result<()> {
 }
 
 fn current_skills(paths: &Paths) -> Result<SkillState> {
-    let skills_dir = skills::resolve_skills_dir(paths)?;
-    let listed = skills::list_skills(&skills_dir)?;
-    let active = listed
+    // `~/.claude/skills` is a real directory; managed skills are per-skill symlinks
+    // into the store. Active = managed links that are not muted. Wild (real)
+    // subdirectories are untracked and never count as active — this fixes the
+    // false-dirty bug where externally-installed skills inflated the active set.
+    let entries = skills::list_skills_ext(&paths.claude_skills)?;
+    let statuses: SkillStatuses = entries
+        .iter()
+        .filter(|e| e.managed)
+        .map(|e| (e.name.clone(), e.disabled))
+        .collect();
+    let active = statuses
         .iter()
         .filter(|(_, disabled)| !disabled)
         .map(|(name, _)| name.clone())
         .collect();
-    Ok((active, listed))
+    Ok((active, statuses))
 }
 
 fn current_mcp(paths: &Paths) -> Result<McpState> {
@@ -416,15 +424,17 @@ base = "base"
         );
         env.write_file(&env.paths.claude_md_file, "derived instructions");
 
-        let derived_skills = env.paths.skill_sets.join("derived");
-        std::fs::create_dir_all(&derived_skills).unwrap();
-        env.create_skill(&derived_skills, "alpha", "---\nname: alpha\n---\n");
-        env.create_skill(
-            &derived_skills,
+        // New model: ~/.claude/skills is a real directory holding per-skill
+        // symlinks into the store. `alpha` is active; `beta` is managed but muted
+        // (disable-model-invocation in its store SKILL.md), so it must not appear
+        // in the captured active set.
+        env.create_store_skill("alpha", "---\nname: alpha\n---\n");
+        env.create_store_skill(
             "beta",
             "---\nname: beta\ndisable-model-invocation: true\n---\n",
         );
-        switch_skills_symlink(&env.paths, "derived").unwrap();
+        env.link_into_claude_skills("alpha");
+        env.link_into_claude_skills("beta");
 
         save_current_persona(&env.paths, "derived").unwrap();
 

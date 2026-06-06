@@ -1,9 +1,8 @@
 use anyhow::{Result, bail};
 
-use crate::claude::skills as skill_ops;
 use crate::claude::{mcp, settings};
-use crate::commands::init;
 use crate::config::Paths;
+use crate::diagnostics;
 use crate::persona::{self, ClaudeMdConfig, McpConfig, Persona, SkillsConfig};
 
 pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
@@ -21,18 +20,23 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
     // Snapshot settings.json
     let current_settings = settings::read_settings(&paths.claude_settings)?;
 
-    // Snapshot skills
-    let skills_dir = if paths.claude_skills.is_symlink() {
-        std::fs::read_link(&paths.claude_skills)?
-    } else {
-        paths.claude_skills.clone()
-    };
-    let skill_list = skill_ops::list_skills(&skills_dir)?;
-    let active_skills: Vec<String> = skill_list
-        .iter()
-        .filter(|(_, disabled)| !disabled)
-        .map(|(name, _)| name.clone())
-        .collect();
+    // Snapshot skills: active = the set of managed per-skill links currently under
+    // ~/.claude/skills (symlinks into the shared store). Wild (real) subdirectories
+    // are NOT captured — they belong to no persona until adopted. Warn so the user
+    // can `cc-persona adopt` them first if they want them tracked.
+    let managed = diagnostics::list_managed_links(paths)?;
+    let mut active_skills: Vec<String> = managed.into_iter().map(|(name, _)| name).collect();
+    active_skills.sort();
+
+    let untracked = diagnostics::list_untracked_skills(paths)?;
+    if !untracked.is_empty() {
+        eprintln!(
+            "  ⚠ {} untracked skill(s) not captured (wild directories): {}",
+            untracked.len(),
+            untracked.join(", ")
+        );
+        eprintln!("    Run `cc-persona adopt` first if you want them in this persona.");
+    }
 
     // Snapshot MCP
     let mcp_servers = mcp::list_mcp_servers(&paths.claude_json)?;
@@ -71,14 +75,9 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
     paths.ensure_dirs()?;
     persona.save(&persona_file)?;
 
-    // Copy current skills into persona skill-set
-    let target_skill_set = paths.skill_sets.join(&persona_name);
-    std::fs::create_dir_all(&target_skill_set)?;
-    if skills_dir.exists() && skills_dir.is_dir() {
-        copy_dir_contents(&skills_dir, &target_skill_set)?;
-    }
-    // Ensure cc-persona skill is always present
-    init::install_skill(&target_skill_set.join("cc-persona"))?;
+    // Skills are shared via the store — no physical copy is made. The persona only
+    // references active skill names; activation happens via per-skill links built
+    // on `cc-persona use`.
 
     // Copy current CLAUDE.md
     let md_target = paths.claude_md.join(format!("{}.md", persona_name));
@@ -92,22 +91,6 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
 
     eprintln!("✓ Snapped current config as persona '{}'", persona_name);
     eprintln!("  File: {}", persona_file.display());
-    Ok(())
-}
-
-fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            std::fs::create_dir_all(&dst_path)?;
-            copy_dir_contents(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
     Ok(())
 }
 
@@ -150,15 +133,13 @@ mod tests {
         );
         env.write_file(&env.paths.claude_md_file, "current claude instructions");
 
-        let source_skills = env.paths.root.join("source-skills");
-        std::fs::create_dir_all(&source_skills).unwrap();
-        env.create_skill(&source_skills, "alpha", "---\nname: alpha\n---\n");
-        env.create_skill(
-            &source_skills,
-            "beta",
-            "---\nname: beta\ndisable-model-invocation: true\n---\n",
-        );
-        env.symlink(&source_skills, &env.paths.claude_skills);
+        // New model: ~/.claude/skills is a real directory; managed links point into
+        // the shared store. `alpha` is managed (active); `wild` is untracked and
+        // must not be captured.
+        std::fs::create_dir_all(&env.paths.claude_skills).unwrap();
+        env.create_store_skill("alpha", "---\nname: alpha\n---\n");
+        env.link_into_claude_skills("alpha");
+        env.create_skill(&env.paths.claude_skills, "wild", "---\nname: wild\n---\n");
 
         run(&env.paths, Some("engineer".to_string())).unwrap();
 
@@ -176,6 +157,7 @@ mod tests {
                 }
             }))
         );
+        // Only the managed link `alpha` is captured; `wild` is excluded.
         assert_eq!(snapped.skills.unwrap().active, vec!["alpha"]);
         let mcp = snapped.mcp.unwrap();
         assert_eq!(mcp.enable, vec!["GitHub"]);
@@ -183,16 +165,6 @@ mod tests {
         assert_eq!(
             snapped.claude_md.unwrap().file.as_deref(),
             Some("engineer.md")
-        );
-
-        let snapped_skill_set = env.paths.skill_sets.join("engineer");
-        assert!(snapped_skill_set.join("alpha").join("SKILL.md").exists());
-        assert!(snapped_skill_set.join("beta").join("SKILL.md").exists());
-        assert!(
-            snapped_skill_set
-                .join("cc-persona")
-                .join("SKILL.md")
-                .exists()
         );
         assert_eq!(
             env.read_file(&env.paths.claude_md.join("engineer.md")),

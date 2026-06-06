@@ -65,9 +65,29 @@ plain (base) ─┬─ engineer (overrides model, skills, MCP)
               └─ designer (overrides skills, CLAUDE.md)
 ```
 
-### Symlink-based instant switching
+### Skill store + per-skill links
 
-Skills and CLAUDE.md switch via symlinks — zero copy, zero latency. `~/.claude/skills` is a symlink that points to the active persona's skill-set directory. Switching personas just re-points the link.
+`~/.claude/skills/` is a **real directory** that cc-persona keeps in sync — never a symlink to a persona. Every managed skill lives once in a shared **skill store** at `~/.cc-persona/skill-store/<skill>/`, and a persona switch is just a set of per-skill symlinks pointing from `~/.claude/skills/<skill>` back into the store.
+
+```
+~/.cc-persona/skill-store/
+  ├── cc-persona/        # one physical copy per skill
+  ├── issue-creator/
+  └── design-review/
+
+~/.claude/skills/        # a real directory
+  ├── cc-persona  -> ~/.cc-persona/skill-store/cc-persona     (managed link)
+  ├── issue-creator -> ~/.cc-persona/skill-store/issue-creator (managed link)
+  └── some-tool/          # a real subdir = untracked (installed by something else)
+```
+
+This gives three properties the old whole-directory symlink could not:
+
+- **One copy, shared everywhere.** A skill used by three personas is stored once, not copied three times. Cross-persona classification stops being a copy nightmare.
+- **The filesystem is the source of truth for "managed vs wild."** A symlink into the store means cc-persona owns it; a real subdirectory means something else installed it (it is *untracked*, and left untouched).
+- **A persona's `active` list is exact.** Switching personas relinks precisely the listed skills (plus the built-in `cc-persona` skill, always linked) and removes links that are no longer wanted — no silent drift when an installer drops a new skill into the directory.
+
+CLAUDE.md still switches via a single symlink (`replace_with_symlink`) — zero copy, zero latency.
 
 ### CLI x Skill
 
@@ -91,16 +111,39 @@ If the active persona has changed since it was last applied, `cc-persona use` an
 
 This keeps persona files from drifting silently when users install skills, toggle skills, or tweak Claude config during a session.
 
+## Coexisting with the skill ecosystem
+
+Your `~/.claude/skills/` is rarely empty or solely yours. Skill installers — gstack, `skills.sh`, plugin bundles, a `git clone` someone pasted — all drop directories straight into it. Most persona tools fight this; cc-persona is built for it.
+
+Because `~/.claude/skills/` stays a **real directory** and cc-persona only ever owns **symlinks** inside it, the boundary is self-evident and unforgeable:
+
+- A **symlink** into the skill store → cc-persona manages it.
+- A **real subdirectory** → something else installed it. cc-persona calls it *untracked*, never touches it, and never lets it silently override your persona's `active` list.
+
+`cc-persona doctor` shows exactly what is managed, untracked, drifted, or missing. When you want to bring a wild skill under management, `cc-persona adopt` moves it into the store and adds it to a persona — one command, no copy-paste:
+
+```
+$ cc-persona doctor
+  ✗ 3 untracked skills in ~/.claude/skills (installed outside cc-persona)
+      benchmark, qa, scrape
+      Fix: cc-persona adopt --into build
+
+$ cc-persona adopt benchmark qa --into build
+  Adopted 2 skills into persona 'build'. Restart Claude Code to take effect.
+```
+
+Upgrading from v0.1.x (whole-directory symlink)? Run `cc-persona migrate` once to move every existing skill into the store and rebuild links from your active persona.
+
 ## How it works
 
 | Config | File | Switch mechanism |
 |--------|------|-----------------|
 | Settings | `~/.claude/settings.json` | Deep JSON merge overlay |
-| Skills | `~/.claude/skills/` | Symlink to persona's skill-set |
+| Skills | `~/.claude/skills/` | Per-skill symlinks into the shared skill store |
 | MCP servers | `~/.claude.json` | Toggle `disabled` per server |
 | CLAUDE.md | `~/.claude/CLAUDE.md` | Symlink to persona-specific file |
 
-Within a skill-set, individual skills can be toggled on/off via `disable-model-invocation` — giving you per-skill control inside each persona.
+A persona's `active` list is the exact set of skills linked into `~/.claude/skills/` on switch. Anything cc-persona did not link stays a real directory and is left untouched — see [Coexisting with the skill ecosystem](#coexisting-with-the-skill-ecosystem).
 
 ## Install
 
@@ -149,8 +192,8 @@ CC Persona intentionally edits files in your home directory so persona switches 
 Before every `cc-persona use`, the tool creates a timestamped backup under `~/.cc-persona/backups/`.
 
 - `cc-persona off` restores the most recent pre-switch `settings.json`, `~/.claude.json`, and `CLAUDE.md`
-- If `~/.claude/skills` was already a symlink, `off` restores that symlink target
-- If `~/.claude/skills` started as a real directory, the first switch migrates its contents into cc-persona management and future restores keep using the managed skill-set symlink
+- For skills, the backup records which managed links pointed where; `off` rebuilds those links and leaves untracked (real) skill directories untouched
+- Upgrading from a v0.1.x layout? `cc-persona migrate` moves existing skills into the shared store and rebuilds links from your active persona
 - If the active persona is dirty, `use` and `off` stop until you rerun with `--save-current` or `--discard-current`
 
 For safety, CC Persona refuses to delete a real directory when a symlink replacement would be destructive. If a path must be moved manually, the CLI stops and tells you what to do.
@@ -174,10 +217,14 @@ cc-persona edit <name>             Open persona TOML in $EDITOR
 cc-persona show [name]             Print resolved config (with inheritance)
 cc-persona diff [name]             Diff current config vs persona
 cc-persona which                   Print active persona name
+cc-persona doctor                  Diagnose managed / untracked / drift / ghost state
+cc-persona adopt [names] --into <persona>
+                                   Bring untracked skills under management
+cc-persona migrate                 Migrate a v0.1.x layout into the skill store
 
-cc-persona skill list              List skills with ON/OFF status
-cc-persona skill toggle <name>     Toggle skill activation
-cc-persona skill rm <name>         Delete a skill permanently
+cc-persona skill list              List skills with ON/OFF and managed/untracked status
+cc-persona skill toggle <name>     Mute/unmute a skill (writes the shared store copy)
+cc-persona skill rm <name>         Unlink a skill (optionally delete it from the store)
 ```
 
 ## Persona format
@@ -212,17 +259,28 @@ file = "engineer.md"
 ├── config.toml              # tracks active persona
 ├── active-persona-state.json# last applied materialized persona state
 ├── personas/                # persona definitions (TOML)
-├── skill-sets/              # per-persona skill directories
-│   ├── plain/
-│   │   └── cc-persona/      # auto-injected, always present
-│   ├── engineer/
-│   │   ├── cc-persona/
-│   │   ├── issue-creator/
-│   │   └── vibe-explainer/
-│   └── designer/
+├── skill-store/             # one physical copy of every managed skill
+│   ├── cc-persona/          # built-in, always linked
+│   ├── issue-creator/
+│   └── vibe-explainer/
 ├── claude-md/               # per-persona CLAUDE.md files
 └── backups/                 # timestamped pre-switch snapshots
 ```
+
+Each persona links the skills in its `active` list from this store into `~/.claude/skills/`; nothing is copied per persona.
+
+## Known limitations
+
+- **Switches need a Claude Code restart.** Skills, MCP, and settings load at session start. After any `cc-persona use` / `off`, run `/exit` and relaunch for changes to take effect.
+- **`skill toggle` mutes the shared copy.** Because each skill lives once in the store, toggling `disable-model-invocation` affects every persona that links it, not just the active one. Use a persona's `active` list for per-persona inclusion; use `toggle` only for a global mute.
+- **Windows is not yet supported.** Linking uses Unix symlinks; a copy-based fallback is planned. See [Platform support](#platform-support).
+
+## Troubleshooting
+
+- **I switched personas but nothing changed.** Restart Claude Code (`/exit` + relaunch) — config loads at session start.
+- **Skills I didn't expect are active, or a newly installed skill isn't picked up.** Something installed skills outside cc-persona. Run `cc-persona doctor`, then `cc-persona adopt` the ones you want.
+- **Upgrading from v0.1.x.** Run `cc-persona migrate` once to move existing skills into the store and rebuild links.
+- **`use` or `off` refuses with "unsaved changes".** The active persona drifted since it was applied. Rerun with `--save-current` (keep the changes) or `--discard-current` (drop them).
 
 ## Platform support
 

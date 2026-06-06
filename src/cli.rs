@@ -80,6 +80,27 @@ pub enum Commands {
         #[command(subcommand)]
         action: SkillAction,
     },
+
+    /// Diagnose drift, untracked skills/plugins/MCP, and snapshot health
+    #[command(alias = "status")]
+    Doctor,
+
+    /// Adopt untracked skills into a persona (move into the store + add to active)
+    Adopt {
+        /// Target persona (default: active persona)
+        #[arg(long)]
+        into: Option<String>,
+        /// Skill names to adopt (interactive multi-select if omitted)
+        #[arg(num_args = 0..)]
+        names: Vec<String>,
+    },
+
+    /// Migrate a v0.1 layout to the v0.2 shared-store + per-skill-link model
+    Migrate {
+        /// Copy skill-sets into the store instead of moving them
+        #[arg(long)]
+        copy: bool,
+    },
 }
 
 #[derive(Subcommand)]
