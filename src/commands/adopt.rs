@@ -85,7 +85,10 @@ pub fn run(paths: &Paths, into: Option<String>, names: Vec<String>) -> Result<()
         active_persona::write_snapshot(paths, &target)?;
     }
 
-    eprintln!("✓ 已纳管 {} 个 skill,重启 Claude Code 生效", adopted.len());
+    eprintln!(
+        "✓ 已纳管 {} 个 skill,运行 /reload-skills 生效",
+        adopted.len()
+    );
     Ok(())
 }
 

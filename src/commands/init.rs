@@ -45,7 +45,7 @@ the `cc-persona` CLI tool via Bash.
 4. If `use`/`off` reports unsaved changes in the current persona, ask whether to save or discard them
 5. Recommend saving by default, then rerun with `--save-current` or `--discard-current`
 6. After switching, inform the user what changed
-7. **ALWAYS** remind the user to restart their Claude Code session after switching
+7. **ALWAYS** remind the user to run `/reload-skills` (and `/reload-plugins` if plugins changed) after switching; MCP/settings changes may still need a session restart
 
 ## Dirty persona guard
 
@@ -61,11 +61,11 @@ Never silently choose `--discard-current`. Ask the user first.
 
 After ANY successful persona switch (`use` or `off`), you MUST tell the user:
 
-> Persona 已切换。由于 skills、MCP 和 settings 在会话启动时加载，
-> 请输入 `/exit` 退出后重新启动 Claude Code 以使所有变更完全生效。
+> Persona 已切换。运行 `/reload-skills` 让 skill 变更生效；若本次改动了插件，再运行 `/reload-plugins`。MCP 或 settings 改动可能仍需 `/exit` 重启 Claude Code。
 
 This is mandatory — never skip this reminder. The switch modifies config files
 on disk, but the current Claude Code session still holds the old state in memory.
+Reloading (or, for MCP/settings, restarting) is what makes Claude pick up the change.
 "#;
 
 /// Install cc-persona SKILL.md into a given directory.

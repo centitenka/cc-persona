@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1] - 2026-06-06
+
+### Changed
+
+- Post-switch guidance now points to `/reload-skills` (and `/reload-plugins` when plugins changed) instead of a full session restart — updated in the built-in skill reminder, `migrate`, `adopt`, and the README. MCP and `settings.json` changes may still need a session restart.
+
 ## [0.2.0] - 2026-06-06
 
 ### Added

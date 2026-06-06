@@ -60,7 +60,9 @@ pub fn run(paths: &Paths, copy: bool) -> Result<()> {
         active_persona::write_snapshot(paths, active)?;
     }
 
-    eprintln!("✓ Migration complete. Restart Claude Code for changes to take effect.");
+    eprintln!(
+        "✓ Migration complete. Run /reload-skills (and /reload-plugins if plugins changed) to apply."
+    );
     Ok(())
 }
 

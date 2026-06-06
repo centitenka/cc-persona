@@ -129,7 +129,7 @@ $ cc-persona doctor
       Fix: cc-persona adopt --into build
 
 $ cc-persona adopt benchmark qa --into build
-  Adopted 2 skills into persona 'build'. Restart Claude Code to take effect.
+  Adopted 2 skills into persona 'build'. Run /reload-skills to apply.
 ```
 
 Upgrading from v0.1.x (whole-directory symlink)? Run `cc-persona migrate` once to move every existing skill into the store and rebuild links from your active persona.
@@ -177,7 +177,7 @@ cc-persona snap engineer
 cc-persona use engineer
 ```
 
-> After switching, restart your Claude Code session (`/exit` + relaunch) for all changes to take effect.
+> After switching, run `/reload-skills` (and `/reload-plugins` if plugins changed) to apply. MCP and settings changes may still need a session restart (`/exit` + relaunch).
 
 ## Safety and disk changes
 
@@ -271,13 +271,13 @@ Each persona links the skills in its `active` list from this store into `~/.clau
 
 ## Known limitations
 
-- **Switches need a Claude Code restart.** Skills, MCP, and settings load at session start. After any `cc-persona use` / `off`, run `/exit` and relaunch for changes to take effect.
+- **Switches apply via reload.** After any `cc-persona use` / `off`, run `/reload-skills` (and `/reload-plugins` if plugins changed) to pick up the change. MCP and settings changes may still need a session restart (`/exit` + relaunch).
 - **`skill toggle` mutes the shared copy.** Because each skill lives once in the store, toggling `disable-model-invocation` affects every persona that links it, not just the active one. Use a persona's `active` list for per-persona inclusion; use `toggle` only for a global mute.
 - **Windows is not yet supported.** Linking uses Unix symlinks; a copy-based fallback is planned. See [Platform support](#platform-support).
 
 ## Troubleshooting
 
-- **I switched personas but nothing changed.** Restart Claude Code (`/exit` + relaunch) — config loads at session start.
+- **I switched personas but nothing changed.** Run `/reload-skills` (and `/reload-plugins` if plugins changed). MCP and settings changes may still need a session restart (`/exit` + relaunch).
 - **Skills I didn't expect are active, or a newly installed skill isn't picked up.** Something installed skills outside cc-persona. Run `cc-persona doctor`, then `cc-persona adopt` the ones you want.
 - **Upgrading from v0.1.x.** Run `cc-persona migrate` once to move existing skills into the store and rebuild links.
 - **`use` or `off` refuses with "unsaved changes".** The active persona drifted since it was applied. Rerun with `--save-current` (keep the changes) or `--discard-current` (drop them).
