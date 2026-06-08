@@ -7,6 +7,8 @@ pub mod init;
 pub mod list;
 pub mod migrate;
 pub mod off;
+pub mod prune;
+pub mod shell;
 pub mod show;
 pub mod skill;
 pub mod snap;

@@ -30,21 +30,55 @@ the `cc-persona` CLI tool via Bash.
 - `cc-persona off --save-current` — Save current persona changes, then restore
 - `cc-persona off --discard-current` — Discard current persona changes, then restore
 - `cc-persona skill list` — List skills and their status in current persona
-- `cc-persona skill toggle <name>` — Toggle a skill on/off
+- `cc-persona skill toggle <name>` — Toggle a skill on/off (affects the SHARED store — every persona/scope)
 - `cc-persona show [name]` — Show full resolved config of a persona
 - `cc-persona diff [name]` — Compare current config with a persona
-- `cc-persona doctor` — Health-check skills/plugins/MCP state and report drift (alias: `status`)
+- `cc-persona doctor` — Health-check skills/plugins/MCP/projects state and report drift (alias: `status`)
 - `cc-persona adopt [names...]` — Take untracked skills under management (add to a persona)
+- `cc-persona prune` — Remove stale project bindings whose directories no longer exist
 - `cc-persona migrate` — Migrate a v0.1 layout to the shared skill-store + per-skill links
+
+## Scopes — global vs. project (IMPORTANT for multi-window users)
+
+A persona switch applies at one of two scopes:
+
+- **Global** (default): writes user-level config (`~/.claude/…`). One persona for the
+  whole machine — the last switch wins across every Claude Code window.
+- **Project** (`--project`): writes `<cwd>/.claude/settings.local.json` and
+  `<cwd>/.claude/skills/`, recorded per directory. Two windows in two different
+  projects can hold different personas at the same time without fighting.
+
+`--project` is accepted by `use`, `off`, `which`, `show`, `diff`, and `snap`.
+
+**Infer `--project` from intent.** Add `--project` when the user scopes the request to
+the current repo/window — e.g. "for this project", "in this repo", "just this window",
+"只在这个项目", "这个窗口". Use global (no flag) for machine-wide intent like "switch my
+persona", "全局切换". When ambiguous and the user is clearly juggling multiple windows,
+prefer `--project` and say so.
+
+Two scope rules to know:
+- **CLAUDE.md is user-level only.** A persona's `[claude_md]` is applied at global scope
+  and deliberately NOT touched at project scope (project CLAUDE.md merges with user-level
+  and is often git-tracked). Never imply `--project` will change CLAUDE.md.
+- **`skill toggle` is always global** — it edits the one shared store copy and affects
+  every persona and every scope. There is no per-project skill mute.
+
+## Experimental: window scope
+
+- `cc-persona shell <name>` — Launch a Claude Code window with an isolated, persona-scoped
+  config dir (via the undocumented `CLAUDE_CONFIG_DIR`). EXPERIMENTAL and version-fragile;
+  only suggest it when the user explicitly wants a throwaway/isolated window and accepts that
+  caveat. Prefer `--project` for normal per-project work.
 
 ## Workflow
 
 1. If user wants to see options: run `cc-persona list`
-2. If user names a persona: run `cc-persona use <name>`
-3. If user wants to revert: run `cc-persona off`
+2. If user names a persona: run `cc-persona use <name>` (add `--project` when the intent is
+   scoped to this repo/window — see Scopes above)
+3. If user wants to revert: run `cc-persona off` (match the scope they switched at)
 4. If `use`/`off` reports unsaved changes in the current persona, ask whether to save or discard them
 5. Recommend saving by default, then rerun with `--save-current` or `--discard-current`
-6. After switching, inform the user what changed
+6. After switching, inform the user what changed (and at which scope)
 7. **ALWAYS** remind the user to run `/reload-skills` (and `/reload-plugins` if plugins changed) after switching; MCP/settings changes may still need a session restart
 
 ## Dirty persona guard

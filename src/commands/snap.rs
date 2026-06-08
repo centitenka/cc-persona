@@ -1,11 +1,10 @@
 use anyhow::{Result, bail};
 
-use crate::claude::{mcp, settings};
-use crate::config::Paths;
-use crate::diagnostics;
+use crate::claude::{mcp, settings, skills};
+use crate::config::{Paths, Scope, Target};
 use crate::persona::{self, ClaudeMdConfig, McpConfig, Persona, SkillsConfig};
 
-pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
+pub fn run(paths: &Paths, scope: &Scope, name: Option<String>) -> Result<()> {
     let persona_name = name.unwrap_or_else(|| {
         chrono::Local::now()
             .format("snap-%Y%m%d-%H%M%S")
@@ -17,18 +16,27 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
         bail!("Persona '{}' already exists.", persona_name);
     }
 
-    // Snapshot settings.json
-    let current_settings = settings::read_settings(&paths.claude_settings)?;
+    let target = paths.resolve_target(scope);
 
-    // Snapshot skills: active = the set of managed per-skill links currently under
-    // ~/.claude/skills (symlinks into the shared store). Wild (real) subdirectories
-    // are NOT captured — they belong to no persona until adopted. Warn so the user
-    // can `cc-persona adopt` them first if they want them tracked.
-    let managed = diagnostics::list_managed_links(paths)?;
-    let mut active_skills: Vec<String> = managed.into_iter().map(|(name, _)| name).collect();
+    // Snapshot settings (settings.json at global, settings.local.json at project).
+    let current_settings = settings::read_settings(&target.settings_file)?;
+
+    // Snapshot skills: active = the managed per-skill links currently under the
+    // scope's skills dir (symlinks into the shared store). Wild (real)
+    // subdirectories are NOT captured — they belong to no persona until adopted.
+    let entries = skills::list_skills_ext(&target.skills_dir)?;
+    let mut active_skills: Vec<String> = entries
+        .iter()
+        .filter(|e| e.managed)
+        .map(|e| e.name.clone())
+        .collect();
     active_skills.sort();
 
-    let untracked = diagnostics::list_untracked_skills(paths)?;
+    let untracked: Vec<String> = entries
+        .iter()
+        .filter(|e| !e.managed && e.name != "cc-persona")
+        .map(|e| e.name.clone())
+        .collect();
     if !untracked.is_empty() {
         eprintln!(
             "  ⚠ {} untracked skill(s) not captured (wild directories): {}",
@@ -38,20 +46,17 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
         eprintln!("    Run `cc-persona adopt` first if you want them in this persona.");
     }
 
-    // Snapshot MCP
-    let mcp_servers = mcp::list_mcp_servers(&paths.claude_json)?;
-    let enabled_mcp: Vec<String> = mcp_servers
-        .iter()
-        .filter(|(_, disabled)| !disabled)
-        .map(|(name, _)| name.clone())
-        .collect();
-    let disabled_mcp: Vec<String> = mcp_servers
-        .iter()
-        .filter(|(_, disabled)| *disabled)
-        .map(|(name, _)| name.clone())
-        .collect();
+    // Snapshot MCP.
+    let (enabled_mcp, disabled_mcp) = snapshot_mcp(&target)?;
 
-    // Create persona
+    // Create persona. CLAUDE.md is only captured at scopes that manage it.
+    let claude_md = target
+        .claude_md_file
+        .as_ref()
+        .map(|_| ClaudeMdConfig {
+            file: Some(format!("{}.md", persona_name)),
+        });
+
     let persona = Persona {
         name: persona_name.clone(),
         description: format!(
@@ -67,31 +72,51 @@ pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
             enable: enabled_mcp,
             disable: disabled_mcp,
         }),
-        claude_md: Some(ClaudeMdConfig {
-            file: Some(format!("{}.md", persona_name)),
-        }),
+        claude_md,
     };
 
     paths.ensure_dirs()?;
     persona.save(&persona_file)?;
 
-    // Skills are shared via the store — no physical copy is made. The persona only
-    // references active skill names; activation happens via per-skill links built
-    // on `cc-persona use`.
-
-    // Copy current CLAUDE.md
-    let md_target = paths.claude_md.join(format!("{}.md", persona_name));
-    if paths.claude_md_file.exists() {
-        // Resolve symlink to get actual content
-        let content = std::fs::read_to_string(&paths.claude_md_file).unwrap_or_default();
+    // Copy current CLAUDE.md (managed scopes only).
+    if let Some(md_file) = &target.claude_md_file {
+        let md_target = paths.claude_md.join(format!("{}.md", persona_name));
+        let content = if md_file.exists() {
+            std::fs::read_to_string(md_file).unwrap_or_default()
+        } else {
+            String::new()
+        };
         std::fs::write(&md_target, content)?;
-    } else {
-        std::fs::write(&md_target, "")?;
     }
 
     eprintln!("✓ Snapped current config as persona '{}'", persona_name);
     eprintln!("  File: {}", persona_file.display());
     Ok(())
+}
+
+/// Capture `(enable, disable)` MCP name lists for the scope: top-level servers at
+/// global, the connector disabled list at project scope.
+fn snapshot_mcp(target: &Target) -> Result<(Vec<String>, Vec<String>)> {
+    match &target.claude_json_project_key {
+        None => {
+            let servers = mcp::list_mcp_servers(&target.claude_json)?;
+            let enabled = servers
+                .iter()
+                .filter(|(_, disabled)| !disabled)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let disabled = servers
+                .iter()
+                .filter(|(_, disabled)| *disabled)
+                .map(|(name, _)| name.clone())
+                .collect();
+            Ok((enabled, disabled))
+        }
+        Some(key) => {
+            let disabled = mcp::list_disabled_connectors(&target.claude_json, key)?;
+            Ok((Vec::new(), disabled))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,7 +166,7 @@ mod tests {
         env.link_into_claude_skills("alpha");
         env.create_skill(&env.paths.claude_skills, "wild", "---\nname: wild\n---\n");
 
-        run(&env.paths, Some("engineer".to_string())).unwrap();
+        run(&env.paths, &Scope::Global, Some("engineer".to_string())).unwrap();
 
         let persona_file = persona::persona_path(&env.paths.personas, "engineer");
         assert!(persona_file.exists());

@@ -67,7 +67,7 @@ pub fn run_rm(paths: &Paths, name: &str) -> Result<()> {
                 if skills_cfg.active.len() != before {
                     persona.save(&persona_file)?;
                     // Keep the dirty-guard snapshot honest after the active-set change.
-                    active_persona::write_snapshot(paths, active)?;
+                    active_persona::write_snapshot(&paths.global_target(), active)?;
                 }
             }
         }

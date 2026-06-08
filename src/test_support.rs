@@ -1,9 +1,9 @@
-use crate::config::Paths;
-use std::path::Path;
+use crate::config::{Paths, Scope, Target};
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 pub(crate) struct TestEnv {
-    _tempdir: TempDir,
+    tempdir: TempDir,
     pub(crate) paths: Paths,
 }
 
@@ -31,10 +31,24 @@ impl TestEnv {
             claude_json: home.join(".claude.json"),
         };
 
-        Self {
-            _tempdir: tempdir,
-            paths,
-        }
+        Self { tempdir, paths }
+    }
+
+    /// The GLOBAL target (today's `~/.claude/*` destinations + global state).
+    pub(crate) fn global_target(&self) -> Target {
+        self.paths.global_target()
+    }
+
+    /// A throwaway project directory inside the temp home, for project-scope tests.
+    pub(crate) fn project_cwd(&self, name: &str) -> PathBuf {
+        let dir = self.tempdir.path().join("projects").join(name);
+        std::fs::create_dir_all(&dir).expect("create project cwd");
+        dir
+    }
+
+    /// Resolve the [`Target`] for an arbitrary scope (e.g. a project cwd).
+    pub(crate) fn target(&self, scope: &Scope) -> Target {
+        self.paths.resolve_target(scope)
     }
 
     pub(crate) fn write_file(&self, path: &Path, content: &str) {

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::claude::{mcp, settings};
-use crate::config::Paths;
+use crate::config::{AppConfig, Paths, ProjectMeta};
 use crate::persona::{self, Persona};
 use crate::symlink::is_symlink;
 
@@ -193,6 +194,108 @@ pub fn untracked_mcp(paths: &Paths) -> Result<Vec<String>> {
     Ok(untracked)
 }
 
+/// Plugins enabled in `settings.json` (`enabledPlugins[name] == true`).
+///
+/// Informational for `doctor`: an enabled plugin may ship its own MCP servers
+/// (the second of the three MCP sources), which `mcpServers`-name inspection alone
+/// would miss. Distinct from [`untracked_plugins`], which filters to *undeclared* ones.
+pub fn enabled_plugins(paths: &Paths) -> Result<Vec<String>> {
+    let live = settings::read_settings(&paths.claude_settings)?;
+    let mut names = Vec::new();
+    if let Some(map) = live.get("enabledPlugins").and_then(|v| v.as_object()) {
+        for (name, value) in map {
+            if value.as_bool().unwrap_or(false) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Persona `[mcp]` patterns that match no name across any known MCP source.
+///
+/// The v0.2 blind spot: a pattern that matches nothing in `mcpServers`,
+/// `claudeAiMcpEverConnected`, or any project's `disabledMcpServers` silently
+/// no-ops, so a typo'd `enable`/`disable` entry looks applied but does nothing.
+/// `doctor` surfaces these. Matching mirrors apply semantics (substring).
+pub fn unmatched_mcp_patterns(paths: &Paths) -> Result<Vec<String>> {
+    let patterns = declared_mcp_patterns(paths)?;
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json = mcp::read_claude_json(&paths.claude_json)?;
+    // Union across ALL scopes — including every project's `disabledMcpServers` — so a
+    // connector that currently lives only under some `projects.<key>` is not falsely
+    // reported as matching nothing.
+    let known = mcp::all_known_mcp_names(&json);
+    let mut unmatched: Vec<String> = patterns
+        .into_iter()
+        .filter(|p| !known.iter().any(|name| name.contains(p.as_str())))
+        .collect();
+    unmatched.sort();
+    unmatched.dedup();
+    Ok(unmatched)
+}
+
+/// A project binding as seen by `doctor`: its path key, the bound persona, and
+/// whether the project directory still exists on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectBindingStatus {
+    pub path: String,
+    pub persona: String,
+    pub dir_exists: bool,
+}
+
+/// Read-only enumeration of project scopes for `doctor`: every `config.projects`
+/// binding (flagged stale when its directory is gone) plus state dirs under
+/// `~/.cc-persona/projects/` that have no matching binding (orphans).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProjectsReport {
+    pub bindings: Vec<ProjectBindingStatus>,
+    /// Project paths whose state dir survives but whose binding is gone.
+    pub orphan_state_dirs: Vec<String>,
+}
+
+/// Enumerate project bindings (`config.projects`) and orphan state dirs
+/// (`~/.cc-persona/projects/<enc>/meta.json` with no live binding) for `doctor`.
+pub fn projects_report(paths: &Paths) -> Result<ProjectsReport> {
+    let config = AppConfig::load(&paths.config)?;
+    let mut report = ProjectsReport::default();
+
+    let mut bound: BTreeSet<String> = BTreeSet::new();
+    for (path, binding) in &config.projects {
+        bound.insert(path.clone());
+        report.bindings.push(ProjectBindingStatus {
+            path: path.clone(),
+            persona: binding.persona.clone(),
+            dir_exists: std::path::Path::new(path).is_dir(),
+        });
+    }
+
+    let projects_root = paths.projects_root();
+    if projects_root.is_dir() {
+        for entry in std::fs::read_dir(&projects_root)? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let project_path = std::fs::read_to_string(entry.path().join("meta.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<ProjectMeta>(&s).ok())
+                .map(|m| m.project_path)
+                .unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+            if !bound.contains(&project_path) {
+                report.orphan_state_dirs.push(project_path);
+            }
+        }
+    }
+    report.orphan_state_dirs.sort();
+    report.orphan_state_dirs.dedup();
+    Ok(report)
+}
+
 /// Total `(count, bytes)` of all backup directories under `~/.cc-persona/backups`.
 pub fn backups_usage(paths: &Paths) -> Result<(usize, u64)> {
     if !paths.backups.exists() {
@@ -318,5 +421,75 @@ mod tests {
 
         let report = inspect_skills(&env.paths, None).unwrap();
         assert!(report.skills_dir_is_symlink);
+    }
+
+    #[test]
+    fn unmatched_mcp_patterns_flags_patterns_with_no_known_name() {
+        let env = TestEnv::new();
+        env.paths.ensure_dirs().unwrap();
+        env.write_file(
+            &persona::persona_path(&env.paths.personas, "engineer"),
+            "name = \"engineer\"\n\n[mcp]\nenable = [\"GitHub\"]\ndisable = [\"Nonexistent\"]\n",
+        );
+        // Known names: only GitHub (top-level). "Nonexistent" matches nothing → flagged.
+        env.write_file(&env.paths.claude_json, "{\"mcpServers\":{\"GitHub\":{}}}");
+
+        let unmatched = unmatched_mcp_patterns(&env.paths).unwrap();
+        assert_eq!(unmatched, vec!["Nonexistent".to_string()]);
+    }
+
+    #[test]
+    fn projects_report_lists_bindings_and_flags_stale_and_orphan() {
+        let env = TestEnv::new();
+        env.paths.ensure_dirs().unwrap();
+
+        // One live binding + one stale binding (its directory does not exist).
+        let live = env.project_cwd("live");
+        let live_key = crate::config::project_key(&live);
+        let stale_key = "/nonexistent/project".to_string();
+        let mut config = AppConfig::default();
+        config.projects.insert(
+            live_key.clone(),
+            crate::config::ProjectBinding {
+                persona: "engineer".to_string(),
+            },
+        );
+        config.projects.insert(
+            stale_key.clone(),
+            crate::config::ProjectBinding {
+                persona: "designer".to_string(),
+            },
+        );
+        config.save(&env.paths.config).unwrap();
+
+        // An orphan state dir: meta.json present, no matching binding.
+        let orphan_root = env.paths.projects_root().join("orphan-deadbeef");
+        std::fs::create_dir_all(&orphan_root).unwrap();
+        let meta = ProjectMeta {
+            project_path: "/gone/orphan".to_string(),
+            created: None,
+            last_used: None,
+        };
+        env.write_file(
+            &orphan_root.join("meta.json"),
+            &serde_json::to_string(&meta).unwrap(),
+        );
+
+        let report = projects_report(&env.paths).unwrap();
+
+        let live_status = report.bindings.iter().find(|b| b.path == live_key).unwrap();
+        assert!(live_status.dir_exists);
+        assert_eq!(live_status.persona, "engineer");
+        let stale_status = report
+            .bindings
+            .iter()
+            .find(|b| b.path == stale_key)
+            .unwrap();
+        assert!(!stale_status.dir_exists);
+        assert!(
+            report
+                .orphan_state_dirs
+                .contains(&"/gone/orphan".to_string())
+        );
     }
 }

@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::Path;
 
 use crate::claude::{mcp, settings, skills};
-use crate::config::{AppConfig, Paths};
+use crate::config::{AppConfig, Paths, Scope, Target};
 use crate::persona::{self, ClaudeMdConfig, McpConfig, Persona, SkillsConfig};
 
 type SkillStatuses = Vec<(String, bool)>;
@@ -38,22 +39,24 @@ pub fn persist_choice(save_current: bool, discard_current: bool) -> Option<Persi
 
 pub fn guard_and_handle_dirty(
     paths: &Paths,
+    target: &Target,
+    scope: &Scope,
     choice: Option<PersistChoice>,
     rerun_command: &str,
 ) -> Result<()> {
     let config = AppConfig::load(&paths.config)?;
-    let Some(active_persona) = config.active_persona else {
+    let Some(active_persona) = config.binding(scope).map(str::to_string) else {
         return Ok(());
     };
 
-    if !is_dirty(paths, &active_persona)? {
+    if !is_dirty(target, &active_persona)? {
         return Ok(());
     }
 
     match choice {
         Some(PersistChoice::Save) => {
-            save_current_persona(paths, &active_persona)?;
-            write_snapshot(paths, &active_persona)?;
+            save_current_persona(paths, target, &active_persona)?;
+            write_snapshot(target, &active_persona)?;
             eprintln!("✓ Saved current persona '{}'", active_persona);
             Ok(())
         }
@@ -67,56 +70,56 @@ pub fn guard_and_handle_dirty(
     }
 }
 
-pub fn write_snapshot(paths: &Paths, persona_name: &str) -> Result<()> {
-    let state = capture_live_state(paths, persona_name)?;
-    if let Some(parent) = paths.active_persona_state.parent() {
+pub fn write_snapshot(target: &Target, persona_name: &str) -> Result<()> {
+    let state = capture_live_state(target, persona_name)?;
+    if let Some(parent) = target.snapshot_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let content =
         serde_json::to_string_pretty(&state).context("Failed to serialize active persona state")?;
-    std::fs::write(&paths.active_persona_state, content)
+    std::fs::write(&target.snapshot_path, content)
         .context("Failed to write active persona state")?;
     Ok(())
 }
 
-pub fn clear_snapshot(paths: &Paths) -> Result<()> {
-    if paths.active_persona_state.exists() {
-        std::fs::remove_file(&paths.active_persona_state)
+pub fn clear_snapshot(target: &Target) -> Result<()> {
+    if target.snapshot_path.exists() {
+        std::fs::remove_file(&target.snapshot_path)
             .context("Failed to remove active persona state")?;
     }
     Ok(())
 }
 
-fn is_dirty(paths: &Paths, persona_name: &str) -> Result<bool> {
-    let Some(snapshot) = load_snapshot(paths)? else {
+fn is_dirty(target: &Target, persona_name: &str) -> Result<bool> {
+    let Some(snapshot) = load_snapshot(target)? else {
         return Ok(false);
     };
     if snapshot.persona_name != persona_name {
         return Ok(false);
     }
 
-    Ok(snapshot != capture_live_state(paths, persona_name)?)
+    Ok(snapshot != capture_live_state(target, persona_name)?)
 }
 
-fn load_snapshot(paths: &Paths) -> Result<Option<ActivePersonaState>> {
-    if !paths.active_persona_state.exists() {
+fn load_snapshot(target: &Target) -> Result<Option<ActivePersonaState>> {
+    if !target.snapshot_path.exists() {
         return Ok(None);
     }
 
-    let content = std::fs::read_to_string(&paths.active_persona_state)
+    let content = std::fs::read_to_string(&target.snapshot_path)
         .context("Failed to read active persona state")?;
     let state = serde_json::from_str(&content).context("Failed to parse active persona state")?;
     Ok(Some(state))
 }
 
-fn capture_live_state(paths: &Paths, persona_name: &str) -> Result<ActivePersonaState> {
-    let (skills_active, _) = current_skills(paths)?;
-    let (mcp_enable, mcp_disable, _) = current_mcp(paths)?;
-    let claude_md_content = read_current_claude_md(paths)?;
+fn capture_live_state(target: &Target, persona_name: &str) -> Result<ActivePersonaState> {
+    let (skills_active, _) = current_skills(&target.skills_dir)?;
+    let (mcp_enable, mcp_disable, _) = current_mcp(target)?;
+    let claude_md_content = read_current_claude_md(target)?;
 
     Ok(ActivePersonaState {
         persona_name: persona_name.to_string(),
-        settings: settings::read_settings(&paths.claude_settings)?,
+        settings: settings::read_settings(&target.settings_file)?,
         skills_active,
         mcp_enable,
         mcp_disable,
@@ -124,15 +127,15 @@ fn capture_live_state(paths: &Paths, persona_name: &str) -> Result<ActivePersona
     })
 }
 
-fn save_current_persona(paths: &Paths, persona_name: &str) -> Result<()> {
+fn save_current_persona(paths: &Paths, target: &Target, persona_name: &str) -> Result<()> {
     let persona_file = persona::persona_path(&paths.personas, persona_name);
     let mut persona = Persona::load(&persona_file)
         .with_context(|| format!("Failed to load current persona '{}'", persona_name))?;
 
-    let current_settings = settings::read_settings(&paths.claude_settings)?;
-    let (skills_active, _) = current_skills(paths)?;
-    let (mcp_enable, mcp_disable, mcp_names) = current_mcp(paths)?;
-    let current_md_content = read_current_claude_md(paths)?;
+    let current_settings = settings::read_settings(&target.settings_file)?;
+    let (skills_active, _) = current_skills(&target.skills_dir)?;
+    let (mcp_enable, mcp_disable, mcp_names) = current_mcp(target)?;
+    let current_md_content = read_current_claude_md(target)?;
 
     let base_resolved = match persona.base.as_deref() {
         Some(base_name) => Some(Persona::resolve(base_name, &paths.personas)?),
@@ -175,31 +178,36 @@ fn save_current_persona(paths: &Paths, persona_name: &str) -> Result<()> {
         Some(normalize_mcp(&current_mcp))
     };
 
-    let md_filename = persona
-        .claude_md
-        .as_ref()
-        .and_then(|md| md.file.clone())
-        .unwrap_or_else(|| format!("{}.md", persona_name));
-    let md_target = paths.claude_md.join(&md_filename);
-    if let Some(parent) = md_target.parent() {
-        std::fs::create_dir_all(parent)?;
+    // CLAUDE.md is only captured at scopes that manage it (global/window). At
+    // project scope it is a user-level concern, so the persona's claude_md is
+    // left untouched.
+    if target.claude_md_file.is_some() {
+        let md_filename = persona
+            .claude_md
+            .as_ref()
+            .and_then(|md| md.file.clone())
+            .unwrap_or_else(|| format!("{}.md", persona_name));
+        let md_target = paths.claude_md.join(&md_filename);
+        if let Some(parent) = md_target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&md_target, current_md_content)
+            .with_context(|| format!("Failed to save {}", md_target.display()))?;
+        persona.claude_md = Some(ClaudeMdConfig {
+            file: Some(md_filename),
+        });
     }
-    std::fs::write(&md_target, current_md_content)
-        .with_context(|| format!("Failed to save {}", md_target.display()))?;
-    persona.claude_md = Some(ClaudeMdConfig {
-        file: Some(md_filename),
-    });
 
     persona.save(&persona_file)?;
     Ok(())
 }
 
-fn current_skills(paths: &Paths) -> Result<SkillState> {
-    // `~/.claude/skills` is a real directory; managed skills are per-skill symlinks
+fn current_skills(skills_dir: &Path) -> Result<SkillState> {
+    // The skills dir is a real directory; managed skills are per-skill symlinks
     // into the store. Active = managed links that are not muted. Wild (real)
     // subdirectories are untracked and never count as active — this fixes the
     // false-dirty bug where externally-installed skills inflated the active set.
-    let entries = skills::list_skills_ext(&paths.claude_skills)?;
+    let entries = skills::list_skills_ext(skills_dir)?;
     let statuses: SkillStatuses = entries
         .iter()
         .filter(|e| e.managed)
@@ -213,33 +221,46 @@ fn current_skills(paths: &Paths) -> Result<SkillState> {
     Ok((active, statuses))
 }
 
-fn current_mcp(paths: &Paths) -> Result<McpState> {
-    let listed = mcp::list_mcp_servers(&paths.claude_json)?;
-    let enable = listed
-        .iter()
-        .filter(|(_, disabled)| !disabled)
-        .map(|(name, _)| name.clone())
-        .collect();
-    let disable = listed
-        .iter()
-        .filter(|(_, disabled)| *disabled)
-        .map(|(name, _)| name.clone())
-        .collect();
-    let names = listed.into_iter().map(|(name, _)| name).collect();
-    Ok((enable, disable, names))
+/// Capture the live MCP state for dirty detection. Global scope reads the shared
+/// top-level `mcpServers`; project scope reads its own connector list (so a global
+/// MCP change never makes every project's snapshot dirty).
+fn current_mcp(target: &Target) -> Result<McpState> {
+    match &target.claude_json_project_key {
+        None => {
+            let listed = mcp::list_mcp_servers(&target.claude_json)?;
+            let enable = listed
+                .iter()
+                .filter(|(_, disabled)| !disabled)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let disable = listed
+                .iter()
+                .filter(|(_, disabled)| *disabled)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let names = listed.into_iter().map(|(name, _)| name).collect();
+            Ok((enable, disable, names))
+        }
+        Some(key) => {
+            let mut disabled = mcp::list_disabled_connectors(&target.claude_json, key)?;
+            disabled.sort();
+            let names = disabled.clone();
+            Ok((Vec::new(), disabled, names))
+        }
+    }
 }
 
-fn read_current_claude_md(paths: &Paths) -> Result<String> {
-    if !paths.claude_md_file.exists() && !claude_md_file_is_symlink(paths) {
+fn read_current_claude_md(target: &Target) -> Result<String> {
+    let Some(md_file) = &target.claude_md_file else {
+        return Ok(String::new());
+    };
+    let is_symlink = std::fs::symlink_metadata(md_file)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !md_file.exists() && !is_symlink {
         return Ok(String::new());
     }
-    std::fs::read_to_string(&paths.claude_md_file).context("Failed to read CLAUDE.md")
-}
-
-fn claude_md_file_is_symlink(paths: &Paths) -> bool {
-    std::fs::symlink_metadata(&paths.claude_md_file)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
+    std::fs::read_to_string(md_file).context("Failed to read CLAUDE.md")
 }
 
 fn materialize_mcp_state(config: Option<&McpConfig>, server_names: &[String]) -> McpConfig {
@@ -354,10 +375,17 @@ mod tests {
         std::fs::create_dir_all(env.paths.skill_sets.join("engineer")).unwrap();
         switch_skills_symlink(&env.paths, "engineer").unwrap();
 
-        write_snapshot(&env.paths, "engineer").unwrap();
+        write_snapshot(&env.global_target(), "engineer").unwrap();
         env.write_file(&env.paths.claude_md_file, "changed");
 
-        let err = guard_and_handle_dirty(&env.paths, None, "cc-persona off").unwrap_err();
+        let err = guard_and_handle_dirty(
+            &env.paths,
+            &env.global_target(),
+            &Scope::Global,
+            None,
+            "cc-persona off",
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("--save-current"));
     }
 
@@ -436,7 +464,7 @@ base = "base"
         env.link_into_claude_skills("alpha");
         env.link_into_claude_skills("beta");
 
-        save_current_persona(&env.paths, "derived").unwrap();
+        save_current_persona(&env.paths, &env.global_target(), "derived").unwrap();
 
         let saved = Persona::load(&env.paths.personas.join("derived.toml")).unwrap();
         assert_eq!(saved.base.as_deref(), Some("base"));

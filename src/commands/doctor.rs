@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::claude::mcp;
 use crate::config::{AppConfig, Paths};
 use crate::diagnostics;
 use crate::persona::Persona;
@@ -117,17 +118,46 @@ pub fn run(paths: &Paths) -> Result<()> {
         );
     }
 
-    // --- Untracked MCP servers ---
+    // --- MCP source 1: top-level mcpServers ---
     let untracked_mcp = diagnostics::untracked_mcp(paths)?;
     if untracked_mcp.is_empty() {
-        eprintln!("✓ No untracked MCP servers.");
+        eprintln!("✓ No untracked top-level MCP servers.");
     } else {
         eprintln!(
-            "⚠ {} MCP server(s) not referenced by any persona: {}",
+            "⚠ {} top-level MCP server(s) not referenced by any persona: {}",
             untracked_mcp.len(),
             untracked_mcp.join(", ")
         );
         eprintln!("    Fix: add them to a persona's [mcp] section, or `cc-persona snap`.");
+    }
+
+    // --- MCP source 2: enabled plugins may ship their own MCP servers ---
+    let mcp_plugins = diagnostics::enabled_plugins(paths)?;
+    if !mcp_plugins.is_empty() {
+        eprintln!(
+            "  {} enabled plugin(s) may provide MCP servers: {}",
+            mcp_plugins.len(),
+            mcp_plugins.join(", ")
+        );
+    }
+
+    // --- MCP: persona patterns matching nothing (the v0.2 silent-no-op blind spot) ---
+    // Source 3 (per-project connectors / claudeAiMcpEverConnected) feeds the union
+    // these patterns are checked against; per-project disabled state is shown in the
+    // Projects section below.
+    let unmatched_patterns = diagnostics::unmatched_mcp_patterns(paths)?;
+    if unmatched_patterns.is_empty() {
+        eprintln!("✓ Every persona MCP pattern matches a known server/connector.");
+    } else {
+        eprintln!(
+            "⚠ {} persona MCP pattern(s) match no known server/connector: {}",
+            unmatched_patterns.len(),
+            unmatched_patterns.join(", ")
+        );
+        eprintln!(
+            "    Fix: these [mcp] patterns silently no-op. Reconcile them with names in"
+        );
+        eprintln!("         ~/.claude.json (mcpServers / claudeAiMcpEverConnected).");
     }
 
     // --- Snapshot presence (dirty-guard sanity) ---
@@ -140,6 +170,42 @@ pub fn run(paths: &Paths) -> Result<()> {
             );
         } else {
             eprintln!("✓ Active-persona snapshot present.");
+        }
+    }
+
+    // --- Project-scoped bindings (multi-window coexistence) ---
+    let projects = diagnostics::projects_report(paths)?;
+    if projects.bindings.is_empty() && projects.orphan_state_dirs.is_empty() {
+        eprintln!("✓ No project-scoped bindings.");
+    } else {
+        eprintln!("  Project-scoped bindings:");
+        for b in &projects.bindings {
+            if b.dir_exists {
+                // list_connectors reconciles b.path to Claude Code's literal key itself.
+                let off: Vec<String> = mcp::list_connectors(&paths.claude_json, &b.path)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(_, disabled)| *disabled)
+                    .map(|(name, _)| name)
+                    .collect();
+                if off.is_empty() {
+                    eprintln!("    {} → {}", b.path, b.persona);
+                } else {
+                    eprintln!(
+                        "    {} → {} (connectors off: {})",
+                        b.path,
+                        b.persona,
+                        off.join(", ")
+                    );
+                }
+            } else {
+                eprintln!("⚠   {} → {} (project directory is gone)", b.path, b.persona);
+                eprintln!("    Fix: cc-persona prune");
+            }
+        }
+        for orphan in &projects.orphan_state_dirs {
+            eprintln!("⚠   Orphan project state with no binding: {}", orphan);
+            eprintln!("    Fix: cc-persona prune");
         }
     }
 
@@ -217,7 +283,7 @@ mod tests {
         env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
         env.link_into_claude_skills("alpha");
         env.link_into_claude_skills("cc-persona");
-        crate::active_persona::write_snapshot(&env.paths, "engineer").unwrap();
+        crate::active_persona::write_snapshot(&env.global_target(), "engineer").unwrap();
 
         run(&env.paths).unwrap();
     }

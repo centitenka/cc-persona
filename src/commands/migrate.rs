@@ -24,7 +24,7 @@ pub fn run(paths: &Paths, copy: bool) -> Result<()> {
     paths.ensure_dirs()?;
 
     // (0) Backup first — migrate is destructive in `move` mode.
-    let backup_dir = backup::create_backup(paths)?;
+    let backup_dir = backup::create_backup(&paths.global_target(), &paths.skill_store)?;
     eprintln!("✓ Backed up current config to {}", backup_dir.display());
 
     // (A) Pull every skill-set skill into the shared store.
@@ -50,14 +50,19 @@ pub fn run(paths: &Paths, copy: bool) -> Result<()> {
     if let Some(active) = config.active_persona.as_deref() {
         let resolved = Persona::resolve(active, &paths.personas)
             .with_context(|| format!("Failed to resolve active persona '{}'", active))?;
-        let report = skills::reconcile_skills(paths, &resolved)?;
+        let report = skills::reconcile_skills(
+            &paths.claude_skills,
+            &paths.skill_store,
+            &resolved,
+            true,
+        )?;
         eprintln!(
             "✓ Reconciled skills for '{}' ({} linked)",
             active,
             report.linked.len()
         );
         // (E) Repair the dirty-guard snapshot.
-        active_persona::write_snapshot(paths, active)?;
+        active_persona::write_snapshot(&paths.global_target(), active)?;
     }
 
     eprintln!(

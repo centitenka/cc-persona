@@ -111,6 +111,64 @@ If the active persona has changed since it was last applied, `cc-persona use` an
 
 This keeps persona files from drifting silently when users install skills, toggle skills, or tweak Claude config during a session.
 
+## Scoped personas — run different personas in different windows
+
+By default a persona switch is **global**: it writes user-level config (`~/.claude/…`), so
+every Claude Code window on the machine shares one persona and the last `use` wins. That
+breaks down the moment you run two windows doing different work — one editing code, another
+planning a second project. v0.3 adds **scopes** so those windows can hold different personas
+at once.
+
+| | Global (default) | Project (`--project`) | Window (experimental) |
+|---|---|---|---|
+| Settings | `~/.claude/settings.json` | `<cwd>/.claude/settings.local.json` | isolated config dir |
+| Skills | `~/.claude/skills/` | `<cwd>/.claude/skills/` (links into the **same** store) | isolated `skills/` |
+| CLAUDE.md | `~/.claude/CLAUDE.md` | **not managed** (user-level only) | isolated `CLAUDE.md` |
+| MCP servers | `~/.claude.json` `mcpServers` | same `mcpServers` | isolated `.claude.json` |
+| MCP connectors | — | `~/.claude.json` `projects.<cwd>.disabledMcpServers` | isolated |
+| Binding | `config.active_persona` | `config.projects[<cwd>]` | the isolated dir |
+
+### Project scope
+
+Add `--project` to scope a switch to the current directory:
+
+```bash
+# Window A, in ~/work/api
+cc-persona use engineer --project
+
+# Window B, in ~/work/design-system
+cc-persona use designer --project
+
+# Each window keeps its own persona; neither touches ~/.claude/* or the other's project.
+cc-persona which --project        # report this project's binding
+cc-persona off --project          # restore just this project (removes files cc-persona created)
+```
+
+`--project` is accepted by `use`, `off`, `which`, `show`, `diff`, and `snap`. The project's
+`.claude/settings.local.json` and `.claude/skills/` are machine-local (they embed `$HOME` in
+symlinks), so cc-persona auto-adds a `.claude/.gitignore` for them on first use.
+
+Two deliberate rules:
+
+- **CLAUDE.md is a user-level dimension only.** Project CLAUDE.md *merges* with user-level in
+  Claude Code and is often git-tracked and frequently rewritten, so a persona's `[claude_md]`
+  is honored at global scope and **never** touched at project scope.
+- **`skill toggle` is always global.** A skill lives once in the shared store, so muting it
+  affects every scope. Use a persona's `active` list for per-scope inclusion.
+
+`cc-persona doctor` lists every project binding, flags stale ones (directory gone) and orphan
+state dirs, and `cc-persona prune` cleans them up.
+
+### Experimental: window scope
+
+```bash
+cc-persona shell engineer
+```
+
+`shell` materializes the persona into a throwaway config dir under `~/.cc-persona/windows/`
+and launches Claude Code against it via the **undocumented** `CLAUDE_CONFIG_DIR`. It is
+labeled experimental and version-fragile — prefer `--project` for normal per-project work.
+
 ## Coexisting with the skill ecosystem
 
 Your `~/.claude/skills/` is rarely empty or solely yours. Skill installers — gstack, `skills.sh`, plugin bundles, a `git clone` someone pasted — all drop directories straight into it. Most persona tools fight this; cc-persona is built for it.
@@ -138,12 +196,32 @@ Upgrading from v0.1.x (whole-directory symlink)? Run `cc-persona migrate` once t
 
 | Config | File | Switch mechanism |
 |--------|------|-----------------|
-| Settings | `~/.claude/settings.json` | Deep JSON merge overlay |
-| Skills | `~/.claude/skills/` | Per-skill symlinks into the shared skill store |
-| MCP servers | `~/.claude.json` | Toggle `disabled` per server |
-| CLAUDE.md | `~/.claude/CLAUDE.md` | Symlink to persona-specific file |
+| Settings | `~/.claude/settings.json` (or `<cwd>/.claude/settings.local.json`) | Deep JSON merge overlay |
+| Skills | `~/.claude/skills/` (or `<cwd>/.claude/skills/`) | Per-skill symlinks into the shared skill store |
+| MCP servers | `~/.claude.json` `mcpServers` | Toggle `disabled` per server |
+| MCP plugins | `settings.json` `enabledPlugins` | Enable/disable the plugin that ships the server |
+| MCP connectors | `~/.claude.json` `projects.<cwd>.disabledMcpServers` | Add/remove from the per-project disabled list |
+| CLAUDE.md | `~/.claude/CLAUDE.md` | Symlink to persona-specific file (global scope only) |
 
 A persona's `active` list is the exact set of skills linked into `~/.claude/skills/` on switch. Anything cc-persona did not link stays a real directory and is left untouched — see [Coexisting with the skill ecosystem](#coexisting-with-the-skill-ecosystem).
+
+### MCP comes from three places
+
+On a modern Claude Code install the top-level `mcpServers` map is frequently **empty** — the
+servers you actually use come from elsewhere. A persona's `[mcp].enable`/`[mcp].disable`
+patterns are matched (by substring) against all three sources:
+
+1. **Top-level servers** — `mcpServers` in `~/.claude.json` (`disabled` flag per server).
+2. **Plugin-provided MCP** — e.g. the Vercel/Cloudflare plugins ship their servers; toggle
+   them through `[settings].enabledPlugins`.
+3. **claude.ai connectors** — e.g. Figma. Managed **per project** via
+   `projects.<cwd>.disabledMcpServers`, so connector toggles require **project scope**
+   (`--project`). At global scope there is no project key to write.
+
+`cc-persona doctor` reports coverage across all three and flags any `[mcp]` pattern that
+matches **nothing** (a silent no-op — the blind spot this design closes). All writes to the
+shared `~/.claude.json` go through an advisory lock + atomic rename so concurrent windows
+never corrupt it.
 
 ## Install
 
@@ -187,11 +265,14 @@ CC Persona intentionally edits files in your home directory so persona switches 
 - `~/.claude/skills`
 - `~/.claude/CLAUDE.md`
 - `~/.claude.json`
-- `~/.cc-persona/` for personas, per-persona assets, and backups
+- `<cwd>/.claude/settings.local.json` and `<cwd>/.claude/skills/` (project scope only)
+- `~/.cc-persona/` for personas, per-persona assets, per-project state, and backups
 
-Before every `cc-persona use`, the tool creates a timestamped backup under `~/.cc-persona/backups/`.
+Before every `cc-persona use`, the tool creates a timestamped backup (global scope under `~/.cc-persona/backups/`; project scope under `~/.cc-persona/projects/<encoded-cwd>/backups/`).
 
 - `cc-persona off` restores the most recent pre-switch `settings.json`, `~/.claude.json`, and `CLAUDE.md`
+- At project scope, `off` honors **delete-on-restore**: files cc-persona created (e.g. a fresh `settings.local.json` or `.claude/skills/`) are removed rather than left as empty husks
+- Writes to the shared `~/.claude.json` use an advisory lock + atomic rename, so concurrent windows can switch independently without corrupting it
 - For skills, the backup records which managed links pointed where; `off` rebuilds those links and leaves untracked (real) skill directories untouched
 - Upgrading from a v0.1.x layout? `cc-persona migrate` moves existing skills into the shared store and rebuilds links from your active persona
 - If the active persona is dirty, `use` and `off` stop until you rerun with `--save-current` or `--discard-current`
@@ -217,10 +298,20 @@ cc-persona edit <name>             Open persona TOML in $EDITOR
 cc-persona show [name]             Print resolved config (with inheritance)
 cc-persona diff [name]             Diff current config vs persona
 cc-persona which                   Print active persona name
-cc-persona doctor                  Diagnose managed / untracked / drift / ghost state
+cc-persona doctor                  Diagnose skills / plugins / MCP / projects state
 cc-persona adopt [names] --into <persona>
                                    Bring untracked skills under management
+cc-persona prune                   Remove stale project bindings (directory gone)
 cc-persona migrate                 Migrate a v0.1.x layout into the skill store
+
+# Scopes — append --project to scope a switch to the current directory.
+cc-persona use [name] --project    Switch this project's persona (<cwd>/.claude/)
+cc-persona off --project           Restore just this project
+cc-persona which --project         Print this project's binding
+cc-persona show [name] --project   Resolve against this project's persona
+cc-persona diff [name] --project   Diff this project's config vs persona
+cc-persona snap [name] --project   Snapshot this project's config into a persona
+cc-persona shell <name>            EXPERIMENTAL: launch Claude in an isolated config dir
 
 cc-persona skill list              List skills with ON/OFF and managed/untracked status
 cc-persona skill toggle <name>     Mute/unmute a skill (writes the shared store copy)
@@ -244,10 +335,13 @@ outputStyle = "Concise"
 [skills]
 active = ["issue-creator", "vibe-explainer"]
 
+# Patterns substring-match across all three MCP sources (servers, plugins, connectors).
+# Connector toggles (e.g. Figma) only take effect at project scope (`--project`).
 [mcp]
 enable = ["GitHub", "Linear"]
 disable = ["Figma", "Playwright"]
 
+# Applied at global scope only; ignored at project scope (CLAUDE.md is user-level).
 [claude_md]
 file = "engineer.md"
 ```
@@ -256,18 +350,21 @@ file = "engineer.md"
 
 ```
 ~/.cc-persona/
-├── config.toml              # tracks active persona
-├── active-persona-state.json# last applied materialized persona state
+├── config.toml              # tracks the global active persona + per-project bindings
+├── active-persona-state.json# last applied materialized persona state (global scope)
 ├── personas/                # persona definitions (TOML)
 ├── skill-store/             # one physical copy of every managed skill
 │   ├── cc-persona/          # built-in, always linked
 │   ├── issue-creator/
 │   └── vibe-explainer/
 ├── claude-md/               # per-persona CLAUDE.md files
-└── backups/                 # timestamped pre-switch snapshots
+├── projects/                # per-project scope state (snapshot + backups + meta.json)
+│   └── <encoded-cwd>/
+├── windows/                 # experimental window-scope config dirs (cc-persona shell)
+└── backups/                 # timestamped pre-switch snapshots (global scope)
 ```
 
-Each persona links the skills in its `active` list from this store into `~/.claude/skills/`; nothing is copied per persona.
+Each persona links the skills in its `active` list from this store into `~/.claude/skills/` (or `<cwd>/.claude/skills/` at project scope); nothing is copied per persona.
 
 ## Known limitations
 

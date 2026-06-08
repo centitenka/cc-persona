@@ -81,8 +81,13 @@ pub fn run(paths: &Paths, into: Option<String>, names: Vec<String>) -> Result<()
     // adoption takes effect immediately and the dirty-guard stays honest.
     if config.active_persona.as_deref() == Some(target.as_str()) {
         let resolved = Persona::resolve(&target, &paths.personas)?;
-        skills::reconcile_skills(paths, &resolved)?;
-        active_persona::write_snapshot(paths, &target)?;
+        skills::reconcile_skills(
+            &paths.claude_skills,
+            &paths.skill_store,
+            &resolved,
+            true,
+        )?;
+        active_persona::write_snapshot(&paths.global_target(), &target)?;
     }
 
     eprintln!(

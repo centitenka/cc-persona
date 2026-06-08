@@ -1,15 +1,15 @@
 use anyhow::{Result, bail};
 
-use crate::config::{AppConfig, Paths};
+use crate::config::{AppConfig, Paths, Scope};
 use crate::persona::Persona;
 
-pub fn run(paths: &Paths, name: Option<String>) -> Result<()> {
+pub fn run(paths: &Paths, scope: &Scope, name: Option<String>) -> Result<()> {
     let persona_name = match name {
         Some(n) => n,
         None => {
             let config = AppConfig::load(&paths.config)?;
-            match config.active_persona {
-                Some(n) => n,
+            match config.binding(scope) {
+                Some(n) => n.to_string(),
                 None => bail!("No active persona. Specify a name: cc-persona show <name>"),
             }
         }

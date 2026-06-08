@@ -1,17 +1,27 @@
 use anyhow::Result;
 
-use crate::config::{AppConfig, Paths};
+use crate::config::{AppConfig, Paths, Scope};
 use crate::diagnostics;
 use crate::persona::Persona;
 
-pub fn run(paths: &Paths) -> Result<()> {
+pub fn run(paths: &Paths, scope: &Scope) -> Result<()> {
     let config = AppConfig::load(&paths.config)?;
-    match &config.active_persona {
+    let binding = config.binding(scope);
+    match binding {
         Some(name) => println!("{}", name),
         None => println!("(none)"),
     }
 
-    print_drift_hint(paths, config.active_persona.as_deref());
+    // At global scope, surface any project bindings so multi-window users can see
+    // which projects hold which personas at a glance.
+    if scope.is_global() && !config.projects.is_empty() {
+        eprintln!("\n  Project bindings:");
+        for (path, b) in &config.projects {
+            eprintln!("    {} → {}", path, b.persona);
+        }
+    }
+
+    print_drift_hint(paths, binding);
     Ok(())
 }
 

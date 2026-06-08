@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::Paths;
+use crate::claude::mcp;
+use crate::config::Target;
 use crate::symlink::{self, is_symlink};
 
-/// On-disk manifest of the managed per-skill links under `~/.claude/skills`.
+/// On-disk manifest of the managed per-skill links under a `skills/` directory.
 ///
 /// Written as `skills-links.json` inside a backup directory. Records each managed
 /// link's store-relative target (so restore can rebuild it from the shared store)
@@ -23,88 +24,137 @@ pub struct SkillLinksManifest {
     pub untracked: Vec<String>,
 }
 
-/// Create a backup of current Claude Code config before switching.
+/// Which targets existed before the switch, so restore can DELETE the ones
+/// cc-persona created (project `settings.local.json` / `skills/` usually did not
+/// exist before the first `use --project`) rather than leaving empty husks.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct TargetPresence {
+    #[serde(default)]
+    settings: bool,
+    #[serde(default)]
+    skills_dir: bool,
+    #[serde(default)]
+    claude_md: bool,
+}
+
+/// Backup of the project's connector subtree (`projects.<key>.disabledMcpServers`).
+/// `field_present` distinguishes "the field was absent" from "present but empty",
+/// so restore can remove what cc-persona added.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct ConnectorBackup {
+    #[serde(default)]
+    field_present: bool,
+    #[serde(default)]
+    disabled: Vec<String>,
+}
+
+/// Create a backup of the current Claude Code config for `target` before switching.
 /// Returns the backup directory path.
-pub fn create_backup(paths: &Paths) -> Result<PathBuf> {
+pub fn create_backup(target: &Target, skill_store: &Path) -> Result<PathBuf> {
     let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-    let backup_dir = paths.backups.join(format!("pre-switch-{}", timestamp));
+    let backup_dir = target.backups_dir.join(format!("pre-switch-{}", timestamp));
     std::fs::create_dir_all(&backup_dir)?;
 
-    // Backup settings.json
-    if paths.claude_settings.exists() {
-        std::fs::copy(&paths.claude_settings, backup_dir.join("settings.json"))?;
+    // settings (settings.json at global, settings.local.json at project).
+    let mut presence = TargetPresence {
+        settings: target.settings_file.exists(),
+        ..Default::default()
+    };
+    if presence.settings {
+        std::fs::copy(&target.settings_file, backup_dir.join("settings.json"))?;
     }
 
-    // Backup ~/.claude.json (MCP config)
-    if paths.claude_json.exists() {
-        std::fs::copy(&paths.claude_json, backup_dir.join("claude.json"))?;
-    }
-
-    // Backup skills state.
-    if paths.claude_skills.exists() || is_symlink(&paths.claude_skills) {
-        let meta = std::fs::symlink_metadata(&paths.claude_skills)?;
+    // Skills directory state.
+    presence.skills_dir = target.skills_dir.exists() || is_symlink(&target.skills_dir);
+    if presence.skills_dir {
+        let meta = std::fs::symlink_metadata(&target.skills_dir)?;
         if meta.file_type().is_symlink() {
-            // Legacy whole-directory symlink model: record the target so a
-            // restore can recreate it (kept for backward compatibility).
-            let target = std::fs::read_link(&paths.claude_skills)?;
+            // Legacy whole-directory symlink model: record the target.
+            let link_target = std::fs::read_link(&target.skills_dir)?;
             std::fs::write(
                 backup_dir.join("skills-symlink"),
-                target.to_string_lossy().as_bytes(),
+                link_target.to_string_lossy().as_bytes(),
             )?;
         } else {
-            // New model: `~/.claude/skills` is a real directory holding per-skill
-            // symlinks into the store + wild real subdirectories. Record the
-            // managed links (by store-relative target) and the wild names.
-            let manifest = snapshot_skill_links(paths)?;
+            let manifest = snapshot_skill_links(&target.skills_dir, skill_store)?;
             let content = serde_json::to_string_pretty(&manifest)?;
             std::fs::write(backup_dir.join("skills-links.json"), content)?;
         }
     }
 
-    // Backup CLAUDE.md symlink or file
-    if paths.claude_md_file.exists() || is_symlink(&paths.claude_md_file) {
-        let meta = std::fs::symlink_metadata(&paths.claude_md_file)?;
-        if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(&paths.claude_md_file)?;
+    // MCP: global backs up the whole ~/.claude.json; project backs up only its
+    // connector subtree (so restoring one project never clobbers another).
+    match &target.claude_json_project_key {
+        None => {
+            if target.claude_json.exists() {
+                std::fs::copy(&target.claude_json, backup_dir.join("claude.json"))?;
+            }
+        }
+        Some(key) => {
+            let json = mcp::read_claude_json(&target.claude_json)?;
+            let disabled = mcp::read_project_disabled(&json, key);
+            let backup = ConnectorBackup {
+                field_present: disabled.is_some(),
+                disabled: disabled.unwrap_or_default(),
+            };
             std::fs::write(
-                backup_dir.join("claude-md-symlink"),
-                target.to_string_lossy().as_bytes(),
+                backup_dir.join("connectors.json"),
+                serde_json::to_string_pretty(&backup)?,
             )?;
-        } else {
-            std::fs::copy(&paths.claude_md_file, backup_dir.join("CLAUDE.md"))?;
         }
     }
+
+    // CLAUDE.md — only when this scope manages it.
+    if let Some(md_file) = &target.claude_md_file {
+        presence.claude_md = md_file.exists() || is_symlink(md_file);
+        if presence.claude_md {
+            let meta = std::fs::symlink_metadata(md_file)?;
+            if meta.file_type().is_symlink() {
+                let link_target = std::fs::read_link(md_file)?;
+                std::fs::write(
+                    backup_dir.join("claude-md-symlink"),
+                    link_target.to_string_lossy().as_bytes(),
+                )?;
+            } else {
+                std::fs::copy(md_file, backup_dir.join("CLAUDE.md"))?;
+            }
+        }
+    }
+
+    std::fs::write(
+        backup_dir.join("target-presence.json"),
+        serde_json::to_string_pretty(&presence)?,
+    )?;
 
     Ok(backup_dir)
 }
 
-/// Capture the current managed per-skill links + untracked wild directories under
-/// `~/.claude/skills` into a [`SkillLinksManifest`].
+/// Capture the managed per-skill links + untracked wild directories under
+/// `skills_dir` into a [`SkillLinksManifest`].
 ///
 /// Managed links (symlinks whose target resolves inside the store) record their
 /// store-relative target. Wild real subdirectories are recorded by name only.
-/// When `~/.claude/skills` is itself a symlink (legacy model) or missing, an empty
-/// manifest is returned — the legacy backup path handles that case separately.
-pub fn snapshot_skill_links(paths: &Paths) -> Result<SkillLinksManifest> {
+/// When `skills_dir` is itself a symlink (legacy model) or missing, an empty
+/// manifest is returned.
+pub fn snapshot_skill_links(skills_dir: &Path, skill_store: &Path) -> Result<SkillLinksManifest> {
     let mut manifest = SkillLinksManifest::default();
-    if !paths.claude_skills.exists() || is_symlink(&paths.claude_skills) {
+    if !skills_dir.exists() || is_symlink(skills_dir) {
         return Ok(manifest);
     }
 
-    for entry in std::fs::read_dir(&paths.claude_skills)? {
+    for entry in std::fs::read_dir(skills_dir)? {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
         if is_symlink(&path) {
             let target = std::fs::read_link(&path)?;
-            match store_relative_target(&target, &paths.skill_store) {
+            match store_relative_target(&target, skill_store) {
                 Some(rel) => {
                     manifest.links.insert(name, rel);
                 }
                 None => {
-                    // Foreign symlink (points outside the store) — not managed by
-                    // cc-persona; do not record it as a restorable link.
+                    // Foreign symlink (points outside the store) — not managed.
                 }
             }
         } else if path.is_dir() {
@@ -116,18 +166,21 @@ pub fn snapshot_skill_links(paths: &Paths) -> Result<SkillLinksManifest> {
     Ok(manifest)
 }
 
-/// Rebuild the managed per-skill links described by `manifest` under
-/// `~/.claude/skills`.
+/// Rebuild the managed per-skill links described by `manifest` under `skills_dir`.
 ///
-/// Ensures `~/.claude/skills` is a real directory first, removes every currently
-/// managed symlink (so the restore is exact), then recreates each link from the
-/// store. A manifest entry whose store target no longer exists is warned about and
-/// skipped. Wild/untracked real subdirectories are never touched.
-pub fn restore_skill_links(paths: &Paths, manifest: &SkillLinksManifest) -> Result<()> {
-    symlink::ensure_real_dir(&paths.claude_skills)?;
+/// Ensures `skills_dir` is a real directory first, removes every currently managed
+/// symlink (so the restore is exact), then recreates each link from the store. A
+/// manifest entry whose store target no longer exists is warned about and skipped.
+/// Wild/untracked real subdirectories are never touched.
+pub fn restore_skill_links(
+    skills_dir: &Path,
+    skill_store: &Path,
+    manifest: &SkillLinksManifest,
+) -> Result<()> {
+    symlink::ensure_real_dir(skills_dir)?;
 
     // Drop every currently-present managed symlink so the restore is exact.
-    for entry in std::fs::read_dir(&paths.claude_skills)? {
+    for entry in std::fs::read_dir(skills_dir)? {
         let entry = entry?;
         let path = entry.path();
         if is_symlink(&path) {
@@ -137,7 +190,7 @@ pub fn restore_skill_links(paths: &Paths, manifest: &SkillLinksManifest) -> Resu
 
     // Recreate links from the manifest.
     for (name, rel_target) in &manifest.links {
-        let store_skill = paths.skill_store.join(rel_target);
+        let store_skill = skill_store.join(rel_target);
         if !store_skill.exists() {
             eprintln!(
                 "  ⚠ Skipping link '{}': store skill '{}' no longer exists.",
@@ -146,7 +199,7 @@ pub fn restore_skill_links(paths: &Paths, manifest: &SkillLinksManifest) -> Resu
             );
             continue;
         }
-        let link = paths.claude_skills.join(name);
+        let link = skills_dir.join(name);
         if link.exists() || is_symlink(&link) {
             // A wild real directory (or stray entry) already occupies this name;
             // do not clobber it (I3).
@@ -161,9 +214,10 @@ pub fn restore_skill_links(paths: &Paths, manifest: &SkillLinksManifest) -> Resu
     Ok(())
 }
 
-/// Restore from the most recent backup.
-pub fn restore_latest(paths: &Paths) -> Result<()> {
-    let latest = find_latest_backup(&paths.backups)?;
+/// Restore `target` from its most recent backup. `lock_path` guards the
+/// `~/.claude.json` connector write at project scope.
+pub fn restore_latest(target: &Target, skill_store: &Path, lock_path: &Path) -> Result<()> {
+    let latest = find_latest_backup(&target.backups_dir)?;
     let backup_dir = match latest {
         Some(d) => d,
         None => bail!("No backup found. Nothing to restore."),
@@ -171,54 +225,81 @@ pub fn restore_latest(paths: &Paths) -> Result<()> {
 
     eprintln!("Restoring from: {}", backup_dir.display());
 
-    // Restore settings.json
+    let presence: Option<TargetPresence> = read_json_opt(&backup_dir.join("target-presence.json"));
+
+    // Restore settings.
     let backup_settings = backup_dir.join("settings.json");
     if backup_settings.exists() {
-        std::fs::copy(&backup_settings, &paths.claude_settings)?;
+        std::fs::copy(&backup_settings, &target.settings_file)?;
+    } else if presence.as_ref().is_some_and(|p| !p.settings) {
+        // cc-persona created this file; remove it so no empty husk is left.
+        remove_file_if_exists(&target.settings_file)?;
     }
 
-    // Restore ~/.claude.json
-    let backup_claude_json = backup_dir.join("claude.json");
-    if backup_claude_json.exists() {
-        std::fs::copy(&backup_claude_json, &paths.claude_json)?;
-    }
-
-    // Restore skills. Three on-disk formats, newest first:
-    //   skills-links.json — new model: managed per-skill links + untracked names.
-    //   skills-symlink    — legacy whole-directory symlink target.
-    //   skills-is-dir     — legacy marker that skills was a plain real directory.
+    // Restore skills. Three on-disk formats, newest first.
     let skills_links_file = backup_dir.join("skills-links.json");
     let skills_symlink_file = backup_dir.join("skills-symlink");
     let skills_is_dir = backup_dir.join("skills-is-dir");
     if skills_links_file.exists() {
         let content = std::fs::read_to_string(&skills_links_file)?;
         let manifest: SkillLinksManifest = serde_json::from_str(&content)?;
-        restore_skill_links(paths, &manifest)?;
+        restore_skill_links(&target.skills_dir, skill_store, &manifest)?;
     } else if skills_symlink_file.exists() {
-        let target = std::fs::read_to_string(&skills_symlink_file)?;
-        remove_symlink_or_dir(&paths.claude_skills)?;
-        std::os::unix::fs::symlink(target.trim(), &paths.claude_skills)?;
+        let link_target = std::fs::read_to_string(&skills_symlink_file)?;
+        remove_symlink_or_dir(&target.skills_dir)?;
+        std::os::unix::fs::symlink(link_target.trim(), &target.skills_dir)?;
     } else if skills_is_dir.exists() {
-        // Was a real directory before migration. The contents have been migrated
-        // into the persona's skill-set. Restore by keeping the symlink pointing
-        // to the same skill-set (content is there), or if no symlink exists,
-        // recreate the directory from the skill-set that received the migration.
-        // The simplest safe approach: leave the current symlink as-is since the
-        // skills content is managed by cc-persona now.
         eprintln!("  Note: skills directory was migrated into cc-persona management.");
         eprintln!("  Skills remain accessible via the current skill-set symlink.");
+    } else if presence.as_ref().is_some_and(|p| !p.skills_dir) {
+        // The skills dir did not exist before this switch (typical at project
+        // scope's first `use`). Strip the managed links cc-persona added, then
+        // remove the now-empty dir — leaving any untracked real subdir in place.
+        remove_managed_links(&target.skills_dir, skill_store);
+        remove_dir_if_empty(&target.skills_dir);
     }
 
-    // Restore CLAUDE.md
-    let claude_md_symlink_file = backup_dir.join("claude-md-symlink");
-    let claude_md_backup = backup_dir.join("CLAUDE.md");
-    if claude_md_symlink_file.exists() {
-        let target = std::fs::read_to_string(&claude_md_symlink_file)?;
-        remove_symlink_or_file(&paths.claude_md_file)?;
-        std::os::unix::fs::symlink(target.trim(), &paths.claude_md_file)?;
-    } else if claude_md_backup.exists() {
-        remove_symlink_or_file(&paths.claude_md_file)?;
-        std::fs::copy(&claude_md_backup, &paths.claude_md_file)?;
+    // Restore MCP.
+    let backup_claude_json = backup_dir.join("claude.json");
+    let backup_connectors = backup_dir.join("connectors.json");
+    if backup_claude_json.exists() {
+        // Global scope: whole-file restore. Route it through the SAME lock the
+        // project-scope writers use, so a concurrent window's read-modify-write of
+        // projects.<key> is serialized against this overwrite rather than racing it.
+        let value = mcp::read_claude_json(&backup_claude_json)?;
+        mcp::update_claude_json(&target.claude_json, lock_path, move |json| {
+            *json = value;
+            Ok(())
+        })?;
+    } else if let (Some(key), Some(backup)) = (
+        target.claude_json_project_key.as_deref(),
+        read_json_opt::<ConnectorBackup>(&backup_connectors),
+    ) {
+        // Project scope: restore only this project's connector subtree.
+        mcp::update_claude_json(&target.claude_json, lock_path, |json| {
+            let value = if backup.field_present {
+                Some(backup.disabled.as_slice())
+            } else {
+                None
+            };
+            mcp::set_project_disabled(json, key, value)
+        })?;
+    }
+
+    // Restore CLAUDE.md (only when this scope manages it).
+    if let Some(md_file) = &target.claude_md_file {
+        let claude_md_symlink_file = backup_dir.join("claude-md-symlink");
+        let claude_md_backup = backup_dir.join("CLAUDE.md");
+        if claude_md_symlink_file.exists() {
+            let link_target = std::fs::read_to_string(&claude_md_symlink_file)?;
+            remove_symlink_or_file(md_file)?;
+            std::os::unix::fs::symlink(link_target.trim(), md_file)?;
+        } else if claude_md_backup.exists() {
+            remove_symlink_or_file(md_file)?;
+            std::fs::copy(&claude_md_backup, md_file)?;
+        } else if presence.as_ref().is_some_and(|p| !p.claude_md) {
+            remove_symlink_or_file(md_file)?;
+        }
     }
 
     Ok(())
@@ -236,6 +317,50 @@ fn find_latest_backup(backups_dir: &Path) -> Result<Option<PathBuf>> {
     Ok(entries.last().map(|e| e.path()))
 }
 
+/// Read+deserialize a JSON file, returning `None` if missing or malformed.
+fn read_json_opt<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    if path.exists() || is_symlink(path) {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Remove every managed symlink (target resolves inside the store) directly under
+/// `dir`. Best-effort; untracked real subdirectories and foreign symlinks are left
+/// untouched. Used by delete-on-restore to undo links cc-persona created.
+fn remove_managed_links(dir: &Path, skill_store: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_symlink(&path) {
+            continue;
+        }
+        if let Ok(target) = std::fs::read_link(&path) {
+            if store_relative_target(&target, skill_store).is_some() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// Remove a directory if it exists and is empty (best-effort — never errors).
+fn remove_dir_if_empty(path: &Path) {
+    if path.is_dir()
+        && std::fs::read_dir(path)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false)
+    {
+        let _ = std::fs::remove_dir(path);
+    }
+}
+
 /// Express a symlink target as a path relative to the skill-store, if it resolves
 /// inside the store. Returns `None` for foreign targets.
 fn store_relative_target(target: &Path, skill_store: &Path) -> Option<String> {
@@ -245,7 +370,6 @@ fn store_relative_target(target: &Path, skill_store: &Path) -> Option<String> {
     ) {
         (Some(t), Some(s)) => (t, s),
         _ => {
-            // Fall back to lexical comparison when canonicalization fails.
             let rel = target.strip_prefix(skill_store).ok()?;
             return Some(rel.to_string_lossy().to_string());
         }
@@ -336,7 +460,8 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, env.paths.claude_skills.join("foreign")).unwrap();
 
-        let manifest = snapshot_skill_links(&env.paths).unwrap();
+        let manifest =
+            snapshot_skill_links(&env.paths.claude_skills, &env.paths.skill_store).unwrap();
 
         assert_eq!(
             manifest.links.get("alpha").map(String::as_str),
@@ -360,8 +485,9 @@ mod tests {
         std::fs::create_dir_all(&wild).unwrap();
         env.write_file(&wild.join("SKILL.md"), "wild body");
 
+        let target = env.global_target();
         // Snapshot the current state into a backup (writes skills-links.json).
-        let backup_dir = create_backup(&env.paths).unwrap();
+        let backup_dir = create_backup(&target, &env.paths.skill_store).unwrap();
         assert!(backup_dir.join("skills-links.json").exists());
 
         // Drift away from the snapshot: drop beta, add a stray link to gamma.
@@ -369,7 +495,8 @@ mod tests {
         env.create_store_skill("gamma", "---\nname: gamma\n---\n");
         env.link_into_claude_skills("gamma");
 
-        restore_latest(&env.paths).unwrap();
+        let lock = env.paths.root.join("claude-json.lock");
+        restore_latest(&target, &env.paths.skill_store, &lock).unwrap();
 
         // Managed links match the snapshot exactly: alpha + beta back, gamma gone.
         assert!(env.paths.claude_skills.join("alpha").is_symlink());
@@ -392,7 +519,7 @@ mod tests {
             .links
             .insert("ghost".to_string(), "ghost".to_string());
 
-        restore_skill_links(&env.paths, &manifest).unwrap();
+        restore_skill_links(&env.paths.claude_skills, &env.paths.skill_store, &manifest).unwrap();
 
         // The missing target is skipped, not an error, and no link is created.
         assert!(!env.paths.claude_skills.join("ghost").exists());
@@ -412,11 +539,12 @@ mod tests {
             &backup_dir.join("skills-symlink"),
             &legacy_target.to_string_lossy(),
         );
-        // ensure_dirs does not create ~/.claude/skills (it is created lazily), so
-        // the legacy restore is free to recreate it as a whole-directory symlink.
+        // ensure_dirs does not create ~/.claude/skills (it is created lazily).
         assert!(!env.paths.claude_skills.exists());
 
-        restore_latest(&env.paths).unwrap();
+        let target = env.global_target();
+        let lock = env.paths.root.join("claude-json.lock");
+        restore_latest(&target, &env.paths.skill_store, &lock).unwrap();
 
         assert!(env.paths.claude_skills.is_symlink());
         assert_eq!(

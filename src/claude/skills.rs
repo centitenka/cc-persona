@@ -52,31 +52,38 @@ pub struct SkillEntry {
 /// - Desired skill already linked → idempotent no-op.
 /// - Desired skill blocked by a same-named real directory → recorded as `shadowed`.
 /// - Otherwise the store skill is linked and recorded as `linked`.
-pub fn reconcile_skills(paths: &Paths, persona: &Persona) -> Result<ReconcileReport> {
+pub fn reconcile_skills(
+    skills_dir: &Path,
+    skill_store: &Path,
+    persona: &Persona,
+    include_cc_persona: bool,
+) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
 
-    // Compute the desired skill set: active ∪ {cc-persona}.
+    // Compute the desired skill set: active, plus {cc-persona} at scopes that own
+    // the user-level skills dir. At project scope cc-persona is supplied by the
+    // user-level link (project + user skills merge), so it is not force-linked.
     let mut desired: Vec<String> = persona
         .skills
         .as_ref()
         .map(|s| s.active.clone())
         .unwrap_or_default();
-    if !desired.iter().any(|n| n == CC_PERSONA_SKILL) {
+    if include_cc_persona && !desired.iter().any(|n| n == CC_PERSONA_SKILL) {
         desired.push(CC_PERSONA_SKILL.to_string());
     }
 
-    // ~/.claude/skills must be a real directory (I1).
-    symlink::ensure_real_dir(&paths.claude_skills)?;
+    // The skills dir must be a real directory (I1).
+    symlink::ensure_real_dir(skills_dir)?;
 
-    // Pass 1: classify everything currently in ~/.claude/skills.
-    for entry in std::fs::read_dir(&paths.claude_skills)? {
+    // Pass 1: classify everything currently in the skills dir.
+    for entry in std::fs::read_dir(skills_dir)? {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
         if is_symlink(&path) {
             let target = std::fs::read_link(&path)?;
-            if !target_in_store(&target, &paths.skill_store) {
+            if !target_in_store(&target, skill_store) {
                 report.foreign_links.push(name);
                 continue;
             }
@@ -94,12 +101,12 @@ pub fn reconcile_skills(paths: &Paths, persona: &Persona) -> Result<ReconcileRep
 
     // Pass 2: ensure each desired skill is linked from the store.
     for name in &desired {
-        let store_skill = paths.skill_store.join(name);
+        let store_skill = skill_store.join(name);
         if !store_skill.exists() {
             report.ghosts.push(name.clone());
             continue;
         }
-        let link = paths.claude_skills.join(name);
+        let link = skills_dir.join(name);
         if is_symlink(&link) {
             // Already linked (and target validated as in-store in pass 1).
             continue;
@@ -599,6 +606,16 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn reconcile(env: &TestEnv, persona: &Persona) -> Result<ReconcileReport> {
+        reconcile_skills(
+            &env.paths.claude_skills,
+            &env.paths.skill_store,
+            persona,
+            true,
+        )
+    }
+
+    #[cfg(unix)]
     fn read_link_name(path: &Path) -> String {
         std::fs::read_link(path)
             .unwrap()
@@ -617,7 +634,7 @@ mod tests {
         env.create_store_skill("beta", "---\nname: beta\n---\n");
         env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
 
-        let report = reconcile_skills(&env.paths, &persona_with_active(&["alpha"])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&["alpha"])).unwrap();
 
         assert_eq!(report.linked, vec!["alpha", "cc-persona"]);
         assert!(env.paths.claude_skills.join("alpha").is_symlink());
@@ -636,10 +653,10 @@ mod tests {
         env.paths.ensure_dirs().unwrap();
         env.create_store_skill("alpha", "---\nname: alpha\n---\n");
         env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
-        reconcile_skills(&env.paths, &persona_with_active(&["alpha"])).unwrap();
+        reconcile(&env, &persona_with_active(&["alpha"])).unwrap();
         assert!(env.paths.claude_skills.join("alpha").is_symlink());
 
-        let report = reconcile_skills(&env.paths, &persona_with_active(&[])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&[])).unwrap();
 
         assert_eq!(report.unlinked, vec!["alpha"]);
         assert!(!env.paths.claude_skills.join("alpha").exists());
@@ -660,7 +677,7 @@ mod tests {
         std::fs::create_dir_all(&wild).unwrap();
         env.write_file(&wild.join("SKILL.md"), "---\nname: wild\n---\nBody\n");
 
-        let report = reconcile_skills(&env.paths, &persona_with_active(&[])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&[])).unwrap();
 
         assert_eq!(report.untracked, vec!["wild"]);
         // Untouched: still a real directory with its original contents.
@@ -680,7 +697,7 @@ mod tests {
         env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
 
         // "missing" is desired but has no store directory.
-        let report = reconcile_skills(&env.paths, &persona_with_active(&["missing"])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&["missing"])).unwrap();
 
         assert_eq!(report.ghosts, vec!["missing"]);
         assert!(!env.paths.claude_skills.join("missing").exists());
@@ -699,7 +716,7 @@ mod tests {
         std::fs::create_dir_all(&blocker).unwrap();
         env.write_file(&blocker.join("SKILL.md"), "wild alpha");
 
-        let report = reconcile_skills(&env.paths, &persona_with_active(&["alpha"])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&["alpha"])).unwrap();
 
         assert_eq!(report.shadowed, vec!["alpha"]);
         // The wild directory is not overwritten.
@@ -721,7 +738,7 @@ mod tests {
         let foreign = env.paths.claude_skills.join("foreign");
         std::os::unix::fs::symlink(&outside, &foreign).unwrap();
 
-        let report = reconcile_skills(&env.paths, &persona_with_active(&[])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&[])).unwrap();
 
         assert_eq!(report.foreign_links, vec!["foreign"]);
         // Foreign links are left alone, never removed.
@@ -736,10 +753,10 @@ mod tests {
         env.create_store_skill("alpha", "---\nname: alpha\n---\n");
         env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
 
-        let first = reconcile_skills(&env.paths, &persona_with_active(&["alpha"])).unwrap();
+        let first = reconcile(&env, &persona_with_active(&["alpha"])).unwrap();
         assert_eq!(first.linked, vec!["alpha", "cc-persona"]);
 
-        let second = reconcile_skills(&env.paths, &persona_with_active(&["alpha"])).unwrap();
+        let second = reconcile(&env, &persona_with_active(&["alpha"])).unwrap();
         // Second run links nothing new and unlinks nothing.
         assert!(second.linked.is_empty());
         assert!(second.unlinked.is_empty());
@@ -754,7 +771,7 @@ mod tests {
         env.paths.ensure_dirs().unwrap();
         env.create_store_skill("cc-persona", "---\nname: cc-persona\n---\n");
 
-        let report = reconcile_skills(&env.paths, &persona_with_active(&[])).unwrap();
+        let report = reconcile(&env, &persona_with_active(&[])).unwrap();
 
         assert_eq!(report.linked, vec!["cc-persona"]);
         assert!(env.paths.claude_skills.join("cc-persona").is_symlink());
@@ -775,7 +792,7 @@ mod tests {
         std::os::unix::fs::symlink(&legacy_target, &env.paths.claude_skills).unwrap();
         assert!(env.paths.claude_skills.is_symlink());
 
-        reconcile_skills(&env.paths, &persona_with_active(&[])).unwrap();
+        reconcile(&env, &persona_with_active(&[])).unwrap();
 
         assert!(!env.paths.claude_skills.is_symlink());
         assert!(env.paths.claude_skills.is_dir());
